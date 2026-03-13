@@ -1,7 +1,7 @@
 # mcp-server-email
 
 [![CI](https://github.com/boutquin/mcp-server-email/actions/workflows/ci.yml/badge.svg)](https://github.com/boutquin/mcp-server-email/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/boutquin/mcp-server-email/branch/main/graph/badge.svg?token=8GKVWA4O3S)](https://codecov.io/gh/boutquin/mcp-server-email)
+[![codecov](https://codecov.io/gh/boutquin/mcp-server-email/branch/main/graph/badge.svg?token=Y3EWPR8X6K)](https://codecov.io/gh/boutquin/mcp-server-email)
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet)](https://modelcontextprotocol.io)
