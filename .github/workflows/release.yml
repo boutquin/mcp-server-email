@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 jobs:
   release:
@@ -38,9 +39,8 @@ jobs:
         run: gh release upload "${{ github.ref_name }}" dist/mcp-server-email-${{ github.ref_name }}.mcpb --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # MCP Registry publish — uncomment when modelcontextprotocol/publish-action is available
-      # - name: Publish to MCP Registry
-      #   if: vars.PUBLISH_TO_MCP_REGISTRY == 'true'
-      #   uses: modelcontextprotocol/publish-action@v1
-      #   with:
-      #     server-json: server.json
+      - name: Publish to MCP Registry
+        run: |
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

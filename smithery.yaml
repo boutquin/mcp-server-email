@@ -1,0 +1,24 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required:
+      - EMAIL_CONFIG_FILE
+    properties:
+      EMAIL_CONFIG_FILE:
+        type: string
+        description: Absolute path to the JSON account configuration file.
+      EMAIL_DEFAULT_ACCOUNT:
+        type: string
+        description: Default account ID (defaults to first account).
+      LOG_LEVEL:
+        type: string
+        description: "Log level: debug, info, warn, error."
+        default: info
+  commandFunction:
+    |-
+    (config) => ({ command: 'mcp-server-email', env: { EMAIL_CONFIG_FILE: config.EMAIL_CONFIG_FILE, ...(config.EMAIL_DEFAULT_ACCOUNT ? { EMAIL_DEFAULT_ACCOUNT: config.EMAIL_DEFAULT_ACCOUNT } : {}), ...(config.LOG_LEVEL ? { LOG_LEVEL: config.LOG_LEVEL } : {}) } })
+  exampleConfig:
+    EMAIL_CONFIG_FILE: /home/user/.config/mcp-email/accounts.json
