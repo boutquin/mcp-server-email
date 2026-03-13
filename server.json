@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.boutquin/email",
+  "title": "Email (IMAP/SMTP)",
+  "description": "Multi-account IMAP/SMTP email server with 22 tools — read, send, search, organize, thread, attachments, batch operations.",
+  "repository": { "url": "https://github.com/boutquin/mcp-server-email", "source": "github" },
+  "version": "1.0.0",
+  "packages": [{
+    "registryType": "oci",
+    "identifier": "ghcr.io/boutquin/mcp-server-email:latest",
+    "transport": { "type": "stdio" },
+    "environmentVariables": [
+      { "name": "EMAIL_CONFIG_FILE", "description": "Path to account JSON config file", "isRequired": false, "isSecret": false },
+      { "name": "EMAIL_ACCOUNTS", "description": "Inline JSON array of account configs", "isRequired": false, "isSecret": true }
+    ]
+  }]
+}

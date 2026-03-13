@@ -1,0 +1,18 @@
+[
+  {
+    "id": "gmail",
+    "email": "user@gmail.com",
+    "username": "user@gmail.com",
+    "auth_method": "oauth2",
+    "oauth_client_id": "your-client-id.apps.googleusercontent.com",
+    "oauth_client_secret": "your-client-secret"
+  },
+  {
+    "id": "outlook",
+    "email": "user@outlook.com",
+    "username": "user@outlook.com",
+    "auth_method": "oauth2",
+    "oauth_client_id": "your-azure-client-id",
+    "oauth_client_secret": "your-azure-client-secret"
+  }
+]

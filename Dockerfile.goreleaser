@@ -1,0 +1,4 @@
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates
+COPY mcp-server-email /usr/local/bin/mcp-server-email
+ENTRYPOINT ["mcp-server-email"]

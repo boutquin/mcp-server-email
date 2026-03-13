@@ -1,0 +1,74 @@
+version: "2"
+
+linters:
+  default: all
+  disable:
+    # Struct strictness — exhaustruct requires all fields, impractical with external types (mcp, imap)
+    - exhaustruct
+    # Interface returns — ireturn disallows returning interfaces, conflicts with server.ToolHandlerFunc pattern
+    - ireturn
+    # Tag naming — tagliatelle enforces camelCase JSON tags, but config uses snake_case for user-facing files
+    - tagliatelle
+    # Short variable names — varnamelen flags idiomatic Go names (ok, err, c, tt, id, b)
+    - varnamelen
+    # Deprecated linter — wsl replaced by wsl_v5 in golangci-lint v2.2.0
+    - wsl
+    # Dependency allowlist — depguard not needed, go.mod is the source of truth
+    - depguard
+    # Context in struct — containedctx flags imap.Client which stores ctx for connection lifecycle
+    - containedctx
+    # Nil error return — nilerr flags MCP tool pattern: return (ToolResultError, nil) by design
+    - nilerr
+
+  settings:
+    cyclop:
+      max-complexity: 15
+    gocognit:
+      min-complexity: 35
+    revive:
+      rules:
+        - name: package-comments
+          disabled: true
+        - name: exported
+          disabled: true
+
+  exclusions:
+    rules:
+      # Tests: relax errcheck/gosec for os.Setenv, file permissions, verbosity
+      - linters: [errcheck, gosec]
+        path: _test\.go
+        text: "(os\\.(Setenv|Unsetenv)|G104|G306)"
+      # Tests: env-var tests cannot be parallelized (shared process env)
+      - linters: [paralleltest]
+        path: internal/config/config_test\.go
+        text: "TestLoadFromEnv"
+      # Tests: files using unexported symbols must stay in same package
+      - linters: [testpackage]
+        path: (internal/config/|internal/imap/|internal/models/|internal/smtp/|internal/tools/send_)
+      # Tests: table-driven tests are inherently verbose/repetitive
+      - linters: [dupl, funlen, cyclop]
+        path: _test\.go
+      # smtp package name conflicts with stdlib — intentional
+      - linters: [revive]
+        text: "var-naming.*avoid package names"
+        path: internal/smtp/
+      # gosec: config passwords expected (G117), file from env var (G304/G703)
+      - linters: [gosec]
+        text: "G(117|304|703)"
+        path: internal/config/config\.go
+      # gosec: math/rand for jitter not cryptographic (G404)
+      - linters: [gosec]
+        text: "G404"
+      # gosec: int→uint32 cast guarded by bounds check (G115)
+      - linters: [gosec]
+        text: "G115"
+        path: internal/imap/client\.go
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

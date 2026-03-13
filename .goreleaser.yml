@@ -1,0 +1,82 @@
+version: 2
+
+builds:
+  - main: ./cmd/mcp-server-email
+    binary: mcp-server-email
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: ['tar.gz']
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: ['zip']
+
+checksum:
+  name_template: checksums.txt
+
+dockers:
+  - image_templates:
+      - "ghcr.io/boutquin/mcp-server-email:v{{ .Version }}-amd64"
+    use: buildx
+    goarch: amd64
+    dockerfile: Dockerfile.goreleaser
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/boutquin/mcp-server-email"
+      - "--label=io.modelcontextprotocol.server.name=io.github.boutquin/email"
+  - image_templates:
+      - "ghcr.io/boutquin/mcp-server-email:v{{ .Version }}-arm64"
+    use: buildx
+    goarch: arm64
+    dockerfile: Dockerfile.goreleaser
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/boutquin/mcp-server-email"
+      - "--label=io.modelcontextprotocol.server.name=io.github.boutquin/email"
+
+docker_manifests:
+  - name_template: "ghcr.io/boutquin/mcp-server-email:v{{ .Version }}"
+    image_templates:
+      - "ghcr.io/boutquin/mcp-server-email:v{{ .Version }}-amd64"
+      - "ghcr.io/boutquin/mcp-server-email:v{{ .Version }}-arm64"
+  - name_template: "ghcr.io/boutquin/mcp-server-email:latest"
+    image_templates:
+      - "ghcr.io/boutquin/mcp-server-email:v{{ .Version }}-amd64"
+      - "ghcr.io/boutquin/mcp-server-email:v{{ .Version }}-arm64"
+
+brews:
+  - name: mcp-server-email
+    directory: Formula
+    repository:
+      owner: boutquin
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/boutquin/mcp-server-email"
+    description: "Multi-account IMAP/SMTP email MCP server (22 tools)"
+    install: bin.install "mcp-server-email"
+    test: |
+      system "#{bin}/mcp-server-email", "--version"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

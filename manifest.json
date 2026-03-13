@@ -1,0 +1,52 @@
+{
+  "$schema": "https://mcpbundles.com/schema/manifest.json",
+  "name": "mcp-server-email",
+  "version": "1.0.0",
+  "description": "Multi-account IMAP/SMTP email server with 22 MCP tools",
+  "author": "boutquin",
+  "license": "MIT",
+  "server": {
+    "type": "binary",
+    "command": "mcp-server-email"
+  },
+  "platforms": [
+    "linux-x64",
+    "linux-arm64",
+    "darwin-x64",
+    "darwin-arm64",
+    "win32-x64"
+  ],
+  "configuration": {
+    "required": [
+      {
+        "name": "EMAIL_ACCOUNTS",
+        "description": "JSON array of email account configurations",
+        "type": "string"
+      }
+    ]
+  },
+  "tools": [
+    {"name": "email_accounts", "description": "List configured email accounts"},
+    {"name": "email_folders", "description": "List mailbox folders with counts"},
+    {"name": "email_list", "description": "List messages in a folder"},
+    {"name": "email_unread", "description": "List unread messages"},
+    {"name": "email_search", "description": "Search messages by query"},
+    {"name": "email_get", "description": "Get full message by ID"},
+    {"name": "email_send", "description": "Send email via SMTP"},
+    {"name": "email_reply", "description": "Reply to a message"},
+    {"name": "email_forward", "description": "Forward a message"},
+    {"name": "email_move", "description": "Move message to folder"},
+    {"name": "email_copy", "description": "Copy message to folder"},
+    {"name": "email_delete", "description": "Delete message"},
+    {"name": "email_mark_read", "description": "Mark message read/unread"},
+    {"name": "email_flag", "description": "Flag/unflag message"},
+    {"name": "email_draft_create", "description": "Create draft message"},
+    {"name": "email_draft_send", "description": "Send existing draft"},
+    {"name": "email_folder_create", "description": "Create new folder"},
+    {"name": "email_attachment_list", "description": "List message attachments"},
+    {"name": "email_attachment_get", "description": "Download attachment"},
+    {"name": "email_thread", "description": "Get conversation thread"},
+    {"name": "email_read_body", "description": "Read message body content"},
+    {"name": "email_batch", "description": "Batch operations on multiple messages"}
+  ]
+}

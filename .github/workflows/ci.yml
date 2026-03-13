@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+      - run: go test -race -coverprofile=coverage.out ./...
+      - run: go tool cover -func=coverage.out
+      - uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.out
+          flags: unit
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.11.3
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+      - name: Fuzz ParseMessageID
+        run: go test -fuzz=FuzzParseMessageID -fuzztime=2m ./internal/models/
+      - name: Fuzz HtmlToText
+        run: go test -fuzz=FuzzHtmlToText -fuzztime=2m ./internal/tools/
+      - name: Fuzz BuildSearchCriteria
+        run: go test -fuzz=FuzzBuildSearchCriteria -fuzztime=2m ./internal/imap/
+      - name: Fuzz SplitAddresses
+        run: go test -fuzz=FuzzSplitAddresses -fuzztime=2m ./internal/tools/
+      - name: Fuzz ExtractContentType
+        run: go test -fuzz=FuzzExtractContentType -fuzztime=2m ./internal/imap/
+      - name: Fuzz ExtractAttachmentByIndex
+        run: go test -fuzz=FuzzExtractAttachmentByIndex -fuzztime=2m ./internal/imap/
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      greenmail:
+        image: greenmail/standalone:2.1.0
+        ports:
+          - 3465:3465
+          - 3993:3993
+        env:
+          GREENMAIL_OPTS: "-Dgreenmail.setup.test.all -Dgreenmail.users=test:password@example.com -Dgreenmail.hostname=0.0.0.0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+      - run: go test -tags=integration -race -coverprofile=integration-coverage.out ./...
+        env:
+          TEST_IMAP_HOST: localhost
+          TEST_IMAP_PORT: "3993"
+          TEST_SMTP_HOST: localhost
+          TEST_SMTP_PORT: "3465"
+          TEST_EMAIL: test@example.com
+          TEST_PASSWORD: password
+      - uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: integration-coverage.out
+          flags: integration

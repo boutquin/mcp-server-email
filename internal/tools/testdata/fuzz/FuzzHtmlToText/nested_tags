@@ -1,0 +1,2 @@
+go test fuzz v1
+string("<div><p><a href=\"url\">link</a></p></div>")
