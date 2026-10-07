@@ -36,7 +36,7 @@ func TestNewTokenStore_MkdirAllError(t *testing.T) {
 func TestTokenStore_Save_CreateTempError(t *testing.T) {
 	t.Parallel()
 
-	// Create a store with a valid directory, then make it read-only.
+	// Point a valid store at a missing directory to make CreateTemp fail on every OS.
 	dir := t.TempDir()
 
 	store, err := NewTokenStore(dir)
@@ -44,15 +44,7 @@ func TestTokenStore_Save_CreateTempError(t *testing.T) {
 		t.Fatalf("NewTokenStore() error = %v", err)
 	}
 
-	// Make directory read-only so CreateTemp fails.
-	err = os.Chmod(dir, 0500) //nolint:gosec // G302: intentionally restricted for test
-	if err != nil {
-		t.Fatalf("Chmod() error = %v", err)
-	}
-
-	t.Cleanup(func() {
-		_ = os.Chmod(dir, 0700) //nolint:gosec // G302: restore for TempDir cleanup
-	})
+	store.baseDir = filepath.Join(dir, "missing")
 
 	err = store.Save("acct", &oauth2.Token{AccessToken: "x"})
 	if err == nil {

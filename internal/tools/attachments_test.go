@@ -48,7 +48,7 @@ func TestValidateAttachments_NonExistent(t *testing.T) {
 	t.Parallel()
 
 	err := tools.ValidateAttachments(
-		[]tools.AttachmentInput{{Path: "/tmp/nonexistent-attachment-test-xyz.txt"}},
+		[]tools.AttachmentInput{{Path: filepath.Join(t.TempDir(), "missing.txt")}},
 		defaultMaxFileBytes, defaultMaxTotalBytes,
 	)
 	if err == nil {

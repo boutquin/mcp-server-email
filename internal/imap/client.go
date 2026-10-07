@@ -107,7 +107,7 @@ func (c *Client) IsConnected() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.conn != nil
+	return c.conn != nil && !c.connInvalid.Load()
 }
 
 // LastActivity returns the time of the last IMAP activity.

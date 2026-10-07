@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -407,13 +406,8 @@ func (c *Client) buildMessage(req *SendRequest) (*mail.Msg, error) {
 		}
 	}
 
-	if req.InReplyTo != "" {
-		m.SetGenHeader(mail.HeaderInReplyTo, req.InReplyTo)
-	}
-
-	if len(req.References) > 0 {
-		m.SetGenHeader(mail.HeaderReferences, strings.Join(req.References, " "))
-	}
+	SetMessageID(m)
+	setThreadingHeaders(m, req)
 
 	m.Subject(req.Subject)
 
@@ -434,7 +428,7 @@ func (c *Client) buildMessage(req *SendRequest) (*mail.Msg, error) {
 // attachFiles adds all attachments to the mail message.
 func attachFiles(m *mail.Msg, attachments []SendAttachment) error {
 	for _, att := range attachments {
-		if len(att.Data) > 0 {
+		if att.Data != nil {
 			err := m.AttachReader(att.Filename, bytes.NewReader(att.Data))
 			if err != nil {
 				return fmt.Errorf("attach %s: %w", att.Filename, err)

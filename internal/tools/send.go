@@ -240,21 +240,27 @@ func DraftSendHandler(imapOps imap.Operations, smtpOps smtp.Operations) server.T
 		}
 
 		// Detect HTML from draft Content-Type by reading the raw message.
-		isHTML := false
+		isHTML := strings.EqualFold(email.ContentType, "text/html")
 
 		raw, draftErr := imapOps.GetDraft(ctx, account, uid)
-		if draftErr == nil {
+		if draftErr == nil && email.ContentType == "" {
 			isHTML = draftContentIsHTML(raw)
+		}
+
+		attachments, err := draftAttachments(ctx, imapOps, account, mailbox, uid)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 
 		// Send via SMTP
 		sendReq := &smtp.SendRequest{
-			To:      email.To,
-			CC:      email.CC,
-			BCC:     email.BCC,
-			Subject: email.Subject,
-			Body:    email.Body,
-			IsHTML:  isHTML,
+			To:          email.To,
+			CC:          email.CC,
+			BCC:         email.BCC,
+			Subject:     email.Subject,
+			Body:        email.Body,
+			IsHTML:      isHTML,
+			Attachments: attachments,
 		}
 
 		err = smtpOps.Send(ctx, account, sendReq)
@@ -271,6 +277,29 @@ func DraftSendHandler(imapOps imap.Operations, smtpOps smtp.Operations) server.T
 			"to":      email.To,
 		}), nil
 	}
+}
+
+// draftAttachments loads every attachment before sending, so an IMAP failure
+// leaves the draft intact rather than sending an incomplete message.
+func draftAttachments(
+	ctx context.Context, ops imap.Operations, account, mailbox string, uid uint32,
+) ([]smtp.SendAttachment, error) {
+	infos, err := ops.GetAttachments(ctx, account, mailbox, uid)
+	if err != nil {
+		return nil, fmt.Errorf("list draft attachments: %w", err)
+	}
+
+	attachments := make([]smtp.SendAttachment, 0, len(infos))
+	for _, info := range infos {
+		data, filename, getErr := ops.GetAttachment(ctx, account, mailbox, uid, info.Index)
+		if getErr != nil {
+			return nil, fmt.Errorf("read draft attachment %d: %w", info.Index, getErr)
+		}
+
+		attachments = append(attachments, smtp.SendAttachment{Filename: filename, Data: data})
+	}
+
+	return attachments, nil
 }
 
 // SplitAddresses splits a comma-separated string of email addresses into a
@@ -338,6 +367,8 @@ func buildDraftMessage(
 	if err != nil {
 		return nil, fmt.Errorf("set from: %w", err)
 	}
+
+	smtp.SetMessageID(m)
 
 	if len(to) > 0 {
 		err = m.To(to...)

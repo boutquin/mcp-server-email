@@ -1567,9 +1567,9 @@ func TestClient_ParseMessageBuffer_WithBody(t *testing.T) {
 		BodySection: []imapclient.FetchBodySectionBuffer{
 			{
 				Section: &imap.FetchItemBodySection{
-					Specifier: imap.PartSpecifierText,
+					Specifier: "",
 				},
-				Bytes: []byte("<h1>Hello</h1>"),
+				Bytes: []byte("Content-Type: text/html\r\n\r\n<h1>Hello</h1>"),
 			},
 			{
 				Section: &imap.FetchItemBodySection{
@@ -1582,13 +1582,16 @@ func TestClient_ParseMessageBuffer_WithBody(t *testing.T) {
 		},
 	}
 
-	email := client.parseMessageBuffer(buf, testMailboxINBOX, true)
+	email, err := client.parseMessageBuffer(buf, testMailboxINBOX, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if email.Subject != "Test" {
 		t.Errorf("Subject = %q", email.Subject)
 	}
 
-	if email.From != "Alice <alice@example.com>" {
+	if email.From != "\"Alice\" <alice@example.com>" {
 		t.Errorf("From = %q", email.From)
 	}
 
@@ -1625,14 +1628,17 @@ func TestClient_ParseMessageBuffer_NoBody(t *testing.T) {
 		BodySection: []imapclient.FetchBodySectionBuffer{
 			{
 				Section: &imap.FetchItemBodySection{
-					Specifier: imap.PartSpecifierText,
+					Specifier: "",
 				},
 				Bytes: []byte("body text here"),
 			},
 		},
 	}
 
-	email := client.parseMessageBuffer(buf, testMailboxINBOX, false)
+	email, err := client.parseMessageBuffer(buf, testMailboxINBOX, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if email.Body != "" {
 		t.Errorf("expected empty body when includeBody=false, got %q", email.Body)
@@ -2286,9 +2292,9 @@ func TestClient_ListMessages_WithBody(t *testing.T) {
 					BodySection: []imapclient.FetchBodySectionBuffer{
 						{
 							Section: &imap.FetchItemBodySection{
-								Specifier: imap.PartSpecifierText,
+								Specifier: "",
 							},
-							Bytes: []byte("body content"),
+							Bytes: []byte("Content-Type: text/plain\r\n\r\nbody content"),
 						},
 					},
 				},
@@ -2331,7 +2337,10 @@ func TestClient_ParseMessageBuffer_WithBCC(t *testing.T) {
 		},
 	}
 
-	email := client.parseMessageBuffer(buf, testMailboxINBOX, false)
+	email, err := client.parseMessageBuffer(buf, testMailboxINBOX, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(email.BCC) != 1 || email.BCC[0] != "g@h.com" {
 		t.Errorf("BCC = %v", email.BCC)

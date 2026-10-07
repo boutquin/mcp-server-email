@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -668,7 +669,7 @@ func TestSendHandler_AttachmentNotFound(t *testing.T) {
 		"subject": "Subject",
 		"body":    "Body",
 		"attachments": []any{
-			map[string]any{"path": "/tmp/nonexistent-attachment-file.txt"},
+			map[string]any{"path": filepath.Join(t.TempDir(), "missing.txt")},
 		},
 	}))
 	if err != nil {

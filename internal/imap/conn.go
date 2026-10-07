@@ -3,7 +3,9 @@ package imap
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"strconv"
@@ -192,6 +194,10 @@ func (c *Client) withTimeout(ctx context.Context, op func() error) error {
 
 	select {
 	case err := <-done:
+		if isTransportError(err) {
+			c.connInvalid.Store(true)
+		}
+
 		return err
 	case <-ctx.Done():
 		// Force-close the raw connection to unblock any hung I/O.
@@ -205,6 +211,15 @@ func (c *Client) withTimeout(ctx context.Context, op func() error) error {
 
 		return fmt.Errorf("operation timed out after %v: %w", c.timeout, ctx.Err())
 	}
+}
+
+// isTransportError identifies unusable connections without treating IMAP
+// command rejections as transport failures. The next request can reconnect.
+func isTransportError(err error) bool {
+	var netErr *net.OpError
+
+	return errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &netErr)
 }
 
 // dialConnection dispatches to the TLS or STARTTLS dial path based on account config.

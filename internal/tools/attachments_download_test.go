@@ -184,7 +184,16 @@ func TestAttachmentGetHandler_SaveToFile(t *testing.T) {
 
 	text := resultText(t, result)
 
-	if !strings.Contains(text, savePath) {
+	var payload struct {
+		Saved string `json:"saved"`
+	}
+
+	err = json.Unmarshal([]byte(text), &payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if payload.Saved != savePath {
 		t.Error("expected save path in result")
 	}
 
@@ -269,7 +278,7 @@ func TestAttachmentGetHandler_PathTraversal(t *testing.T) {
 	result, err := handler(t.Context(), toolReq(map[string]any{
 		"id":     "test:INBOX:42",
 		"index":  float64(0),
-		"saveTo": "/tmp/../etc/passwd",
+		"saveTo": t.TempDir() + string(filepath.Separator) + ".." + string(filepath.Separator) + "file.txt",
 	}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

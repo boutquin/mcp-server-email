@@ -407,8 +407,8 @@ func TestApplyEnvelope(t *testing.T) {
 		t.Errorf("Subject = %q, want %q", email.Subject, "Test Subject")
 	}
 
-	if email.From != "Sender <sender@example.com>" {
-		t.Errorf("From = %q, want %q", email.From, "Sender <sender@example.com>")
+	if email.From != "\"Sender\" <sender@example.com>" {
+		t.Errorf("From = %q, want %q", email.From, "\"Sender\" <sender@example.com>")
 	}
 
 	if len(email.To) != 1 || email.To[0] != "to@example.com" {
@@ -433,8 +433,8 @@ func TestFormatAddress_WithName(t *testing.T) {
 
 	result := formatAddress(imap.Address{Name: "John Doe", Mailbox: "john", Host: "example.com"})
 
-	if result != "John Doe <john@example.com>" {
-		t.Errorf("formatAddress() = %q, want %q", result, "John Doe <john@example.com>")
+	if result != "\"John Doe\" <john@example.com>" {
+		t.Errorf("formatAddress() = %q, want %q", result, "\"John Doe\" <john@example.com>")
 	}
 }
 

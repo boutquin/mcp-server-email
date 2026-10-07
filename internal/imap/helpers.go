@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net/mail"
 	"slices"
 	"strings"
 	"time"
@@ -34,9 +35,8 @@ func buildFetchOptions(includeBody bool) *imap.FetchOptions {
 	}
 
 	if includeBody {
-		opts.BodySection = append(opts.BodySection, &imap.FetchItemBodySection{
-			Specifier: imap.PartSpecifierText,
-		})
+		// Include MIME headers so transfer encoding and charset can be decoded.
+		opts.BodySection = append(opts.BodySection, &imap.FetchItemBodySection{})
 	}
 
 	opts.BodyStructure = &imap.FetchItemBodyStructure{Extended: true}
@@ -62,7 +62,7 @@ func (c *Client) fetchMessages(
 		return nil, fmt.Errorf("fetch messages: %w", err)
 	}
 
-	return c.convertBuffers(buffers, mailbox, includeBody), nil
+	return c.convertBuffers(buffers, mailbox, includeBody)
 }
 
 // fetchMessagesByUID fetches messages by UID set.
@@ -76,7 +76,7 @@ func (c *Client) fetchMessagesByUID(
 		return nil, fmt.Errorf("fetch messages: %w", err)
 	}
 
-	return c.convertBuffers(buffers, mailbox, includeBody), nil
+	return c.convertBuffers(buffers, mailbox, includeBody)
 }
 
 // convertBuffers converts fetched message buffers to email models.
@@ -84,14 +84,19 @@ func (c *Client) convertBuffers(
 	buffers []*imapclient.FetchMessageBuffer,
 	mailbox string,
 	includeBody bool,
-) []models.Email {
+) ([]models.Email, error) {
 	emails := make([]models.Email, 0, len(buffers))
 
 	for _, buf := range buffers {
-		emails = append(emails, c.parseMessageBuffer(buf, mailbox, includeBody))
+		email, err := c.parseMessageBuffer(buf, mailbox, includeBody)
+		if err != nil {
+			return nil, fmt.Errorf("parse message UID %d: %w", buf.UID, err)
+		}
+
+		emails = append(emails, email)
 	}
 
-	return emails
+	return emails, nil
 }
 
 // parseMessageBuffer extracts email data from a fetch message buffer.
@@ -99,7 +104,7 @@ func (c *Client) parseMessageBuffer(
 	buf *imapclient.FetchMessageBuffer,
 	mailbox string,
 	includeBody bool,
-) models.Email {
+) (models.Email, error) {
 	email := models.Email{
 		Mailbox: mailbox,
 		Account: c.account.ID,
@@ -122,11 +127,17 @@ func (c *Client) parseMessageBuffer(
 		if section.Section != nil && section.Section.Specifier == imap.PartSpecifierHeader {
 			applyHeaderFields(&email, bytes.NewReader(section.Bytes))
 		} else if includeBody && len(section.Bytes) > 0 {
-			email.Body = string(section.Bytes)
+			body, contentType, err := decodeMessageBody(section.Bytes)
+			if err != nil {
+				return models.Email{}, err
+			}
+
+			email.Body = body
+			email.ContentType = contentType
 		}
 	}
 
-	return email
+	return email, nil
 }
 
 // buildSearchCriteria constructs IMAP search criteria from the provided filters.
@@ -277,7 +288,9 @@ func parseMessageIDList(s string) []string {
 
 func formatAddress(addr imap.Address) string {
 	if addr.Name != "" {
-		return fmt.Sprintf("%s <%s@%s>", addr.Name, addr.Mailbox, addr.Host)
+		address := mail.Address{Name: addr.Name, Address: fmt.Sprintf("%s@%s", addr.Mailbox, addr.Host)}
+
+		return address.String()
 	}
 
 	return fmt.Sprintf("%s@%s", addr.Mailbox, addr.Host)

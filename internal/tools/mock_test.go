@@ -72,6 +72,7 @@ type mockIMAPOps struct {
 
 	// Call tracking.
 	accountStatusCalled bool
+	deleteDraftCalled   bool
 }
 
 type listMessagesArgs struct {
@@ -272,6 +273,7 @@ func (m *mockIMAPOps) GetDraft(_ context.Context, accountID string, uid uint32) 
 }
 
 func (m *mockIMAPOps) DeleteDraft(_ context.Context, accountID string, uid uint32) error {
+	m.deleteDraftCalled = true
 	m.lastDeleteDraftArgs = deleteDraftArgs{accountID, uid}
 
 	return m.deleteDraftErr

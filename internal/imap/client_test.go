@@ -697,7 +697,7 @@ func TestExtractContentType(t *testing.T) {
 		}
 
 		ct := extractContentType(bs)
-		if ct != "text/plain" {
+		if ct != testContentPlain {
 			t.Errorf("extractContentType() = %q, want %q", ct, "text/plain")
 		}
 	})
@@ -711,7 +711,7 @@ func TestExtractContentType(t *testing.T) {
 		}
 
 		ct := extractContentType(bs)
-		if ct != "text/html" {
+		if ct != testContentHTML {
 			t.Errorf("extractContentType() = %q, want %q", ct, "text/html")
 		}
 	})
