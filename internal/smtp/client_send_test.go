@@ -1,7 +1,9 @@
 package smtp
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,68 @@ import (
 	"github.com/boutquin/mcp-server-email/internal/retry"
 	"github.com/wneessen/go-mail"
 )
+
+type serializingDialer struct {
+	raw []byte
+}
+
+func (d *serializingDialer) DialAndSend(msgs ...*mail.Msg) error {
+	var buf bytes.Buffer
+	if _, err := msgs[0].WriteTo(&buf); err != nil {
+		return err
+	}
+	d.raw = append([]byte(nil), buf.Bytes()...)
+	return nil
+}
+
+func TestClient_SendWithCopy_MatchesTransmittedMessage(t *testing.T) {
+	t.Parallel()
+
+	d := &serializingDialer{}
+	c := &Client{
+		account:   &config.Account{ID: "test", Email: "sender@example.com", SMTPPort: 587},
+		timeout:   time.Second,
+		limiter:   retry.NewLimiter(100, time.Hour),
+		retryCfg:  retry.Config{MaxRetries: 0},
+		logger:    nopLogger,
+		newDialer: func(_ ...mail.Option) (dialer, error) { return d, nil },
+	}
+	raw, err := c.SendWithCopy(t.Context(), &SendRequest{
+		To: []string{"to@example.com"}, Subject: "same MIME", Body: "body",
+	})
+	if err != nil {
+		t.Fatalf("SendWithCopy() error = %v", err)
+	}
+	if !bytes.Equal(raw, d.raw) {
+		t.Fatal("returned Sent copy differs from bytes serialized for SMTP")
+	}
+}
+
+func TestClient_Send_TimeoutIsAmbiguousAndNotRetried(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	c := &Client{
+		account:  &config.Account{ID: "test", Email: "sender@example.com", SMTPPort: 587},
+		timeout:  time.Second,
+		limiter:  retry.NewLimiter(100, time.Hour),
+		retryCfg: retry.Config{MaxRetries: 3, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond},
+		logger:   nopLogger,
+		newDialer: func(_ ...mail.Option) (dialer, error) {
+			attempts++
+			return &mockDialer{err: context.DeadlineExceeded}, nil
+		},
+	}
+
+	err := c.Send(context.Background(), &SendRequest{To: []string{"to@example.com"}, Body: "body"})
+	if !errors.Is(err, ErrDeliveryUnknown) {
+		t.Fatalf("expected ErrDeliveryUnknown, got %v", err)
+	}
+
+	if attempts != 1 {
+		t.Fatalf("expected one send attempt, got %d", attempts)
+	}
+}
 
 // ==================== Client.Send (line 188) — currently 0% ====================
 

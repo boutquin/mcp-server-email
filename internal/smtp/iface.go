@@ -9,6 +9,7 @@ import (
 // enabling mock injection for unit tests.
 type Operations interface {
 	Send(ctx context.Context, accountID string, req *SendRequest) error
+	SendWithCopy(ctx context.Context, accountID string, req *SendRequest) ([]byte, error)
 	AccountEmail(accountID string) (string, error)
 	DefaultAccountID() string
 }

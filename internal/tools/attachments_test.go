@@ -46,9 +46,10 @@ func TestValidateAttachments_RelativePath(t *testing.T) {
 
 func TestValidateAttachments_NonExistent(t *testing.T) {
 	t.Parallel()
+	nonExistentPath := filepath.Join(t.TempDir(), "nonexistent-attachment-test-xyz.txt")
 
 	err := tools.ValidateAttachments(
-		[]tools.AttachmentInput{{Path: "/tmp/nonexistent-attachment-test-xyz.txt"}},
+		[]tools.AttachmentInput{{Path: nonExistentPath}},
 		defaultMaxFileBytes, defaultMaxTotalBytes,
 	)
 	if err == nil {
@@ -149,6 +150,47 @@ func TestValidateAttachments_HappyPath(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateAttachments_ResolvesSymlinks(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(target, []byte("safe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := tools.ValidateAttachments([]tools.AttachmentInput{{Path: link}}, defaultMaxFileBytes, defaultMaxTotalBytes); err != nil {
+		t.Fatalf("expected valid symlink target to pass: %v", err)
+	}
+
+	outside := t.TempDir()
+	outsideTarget := filepath.Join(outside, "outside.txt")
+	if err := os.WriteFile(outsideTarget, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	escapeLink := filepath.Join(dir, "escape.txt")
+	if err := os.Symlink(outsideTarget, escapeLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := tools.ValidateAttachments([]tools.AttachmentInput{{Path: escapeLink}}, defaultMaxFileBytes, defaultMaxTotalBytes); err != nil {
+		t.Fatalf("expected symlink to an accessible file to pass: %v", err)
+	}
+}
+
+func TestValidateAttachments_AllowsAbsolutePathOutsideWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	outside := t.TempDir()
+	path := filepath.Join(outside, "private.txt")
+	if err := os.WriteFile(path, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := tools.ValidateAttachments([]tools.AttachmentInput{{Path: path}}, defaultMaxFileBytes, defaultMaxTotalBytes); err != nil {
+		t.Fatalf("expected accessible absolute path to pass: %v", err)
 	}
 }
 

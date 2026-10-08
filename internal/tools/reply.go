@@ -44,7 +44,10 @@ func ReplyHandler(imapOps imap.Operations, smtpOps smtp.Operations) server.ToolH
 			return mcp.NewToolResultError(parseErr.Error()), nil
 		}
 
-		accountID := resolveAccountID(req.GetString("account", ""), account)
+		accountID, accountErr := canonicalMessageAccount(req.GetString("account", ""), account)
+		if accountErr != nil {
+			return mcp.NewToolResultError(accountErr.Error()), nil
+		}
 
 		// Fetch original message
 		original, err := imapOps.GetMessage(ctx, accountID, mailbox, uid)
@@ -71,8 +74,11 @@ func ReplyHandler(imapOps imap.Operations, smtpOps smtp.Operations) server.ToolH
 			sendReq.BCC = SplitAddresses(bcc)
 		}
 
-		err = smtpOps.Send(ctx, accountID, sendReq)
+		raw, err := smtpOps.SendWithCopy(ctx, accountID, sendReq)
 		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if err := appendSentCopy(ctx, imapOps, accountID, raw); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
@@ -203,7 +209,10 @@ func ForwardHandler(imapOps imap.Operations, smtpOps smtp.Operations, limits Att
 			return mcp.NewToolResultError(parseErr.Error()), nil
 		}
 
-		accountID := resolveAccountID(req.GetString("account", ""), account)
+		accountID, accountErr := canonicalMessageAccount(req.GetString("account", ""), account)
+		if accountErr != nil {
+			return mcp.NewToolResultError(accountErr.Error()), nil
+		}
 
 		// Fetch original message
 		original, err := imapOps.GetMessage(ctx, accountID, mailbox, uid)
@@ -233,8 +242,11 @@ func ForwardHandler(imapOps imap.Operations, smtpOps smtp.Operations, limits Att
 			sendReq.BCC = SplitAddresses(bcc)
 		}
 
-		err = smtpOps.Send(ctx, accountID, sendReq)
+		raw, err := smtpOps.SendWithCopy(ctx, accountID, sendReq)
 		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if err := appendSentCopy(ctx, imapOps, accountID, raw); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
@@ -244,6 +256,15 @@ func ForwardHandler(imapOps imap.Operations, smtpOps smtp.Operations, limits Att
 			"to":      sendReq.To,
 		}), nil
 	}
+}
+
+func canonicalMessageAccount(requested, messageAccount string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested != "" && requested != messageAccount {
+		return "", fmt.Errorf("account %q does not match message account %q", requested, messageAccount)
+	}
+
+	return messageAccount, nil
 }
 
 // buildForwardRequest constructs an smtp.SendRequest for forwarding a message.

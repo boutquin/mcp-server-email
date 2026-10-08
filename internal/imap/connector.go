@@ -52,11 +52,23 @@ type Connector interface {
 	// Expunge permanently removes messages marked as deleted.
 	Expunge() error
 
+	// SupportsUIDExpunge reports whether UID EXPUNGE is available.
+	SupportsUIDExpunge() bool
+
+	// UIDExpunge permanently removes only messages in the given UID set.
+	UIDExpunge(uids imap.UIDSet) error
+
 	// Append appends a message literal to a mailbox.
 	Append(mailbox string, literal []byte, opts *imap.AppendOptions) (*imap.AppendData, error)
 
 	// Create creates a new mailbox.
 	Create(name string, opts *imap.CreateOptions) error
+
+	// Rename renames an existing mailbox.
+	Rename(oldName, newName string, opts *imap.RenameOptions) error
+
+	// Delete deletes an existing mailbox.
+	Delete(name string) error
 
 	// Close closes the underlying connection.
 	Close() error
@@ -193,6 +205,21 @@ func (a *imapclientAdapter) Expunge() error {
 	return nil
 }
 
+func (a *imapclientAdapter) SupportsUIDExpunge() bool {
+	caps := a.client.Caps()
+	return caps.Has(imap.CapUIDPlus) || caps.Has(imap.CapIMAP4rev2)
+}
+
+func (a *imapclientAdapter) UIDExpunge(uids imap.UIDSet) error {
+	cmd := a.client.UIDExpunge(uids)
+	for cmd.Next() != 0 {
+	}
+	if err := cmd.Close(); err != nil {
+		return fmt.Errorf("uid expunge: %w", err)
+	}
+	return nil
+}
+
 func (a *imapclientAdapter) Append(
 	mailbox string, literal []byte, opts *imap.AppendOptions,
 ) (*imap.AppendData, error) {
@@ -222,6 +249,20 @@ func (a *imapclientAdapter) Create(name string, opts *imap.CreateOptions) error 
 		return fmt.Errorf("create: %w", err)
 	}
 
+	return nil
+}
+
+func (a *imapclientAdapter) Rename(oldName, newName string, opts *imap.RenameOptions) error {
+	if err := a.client.Rename(oldName, newName, opts).Wait(); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+func (a *imapclientAdapter) Delete(name string) error {
+	if err := a.client.Delete(name).Wait(); err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
 	return nil
 }
 

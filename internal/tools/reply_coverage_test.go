@@ -457,7 +457,7 @@ func TestForwardHandler_WithCCBCCAndHTML(t *testing.T) {
 	}
 }
 
-func TestForwardHandler_WithAccountOverride(t *testing.T) {
+func TestForwardHandler_RejectsAccountOverride(t *testing.T) {
 	t.Parallel()
 
 	imapMock := &mockIMAPOps{
@@ -488,20 +488,11 @@ func TestForwardHandler_WithAccountOverride(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	text := resultText(t, result)
-
-	var res map[string]any
-
-	err = json.Unmarshal([]byte(text), &res)
-	if err != nil {
-		t.Fatalf("invalid JSON: %v", err)
+	if !result.IsError || !strings.Contains(resultText(t, result), "does not match") {
+		t.Fatalf("expected account mismatch error, got %s", resultText(t, result))
 	}
 
-	if res["success"] != true {
-		t.Fatalf("expected success=true, got %v", res["success"])
-	}
-
-	if smtpMock.lastSendAccountID != "acct2" {
-		t.Errorf("expected send via acct2, got %q", smtpMock.lastSendAccountID)
+	if smtpMock.sendCalled {
+		t.Fatal("account mismatch must not send")
 	}
 }

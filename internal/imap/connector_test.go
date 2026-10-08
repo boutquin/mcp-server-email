@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,8 +58,12 @@ type mockConnector struct {
 	copyFn         func(uidSet imap.UIDSet, dest string) error
 	storeFn        func(seqSet imap.NumSet, flags *imap.StoreFlags, opts *imap.StoreOptions) error
 	expungeFn      func() error
+	uidExpungeFn   func(uids imap.UIDSet) error
+	uidExpunge     bool
 	appendFn       func(mailbox string, literal []byte, opts *imap.AppendOptions) (*imap.AppendData, error)
 	createFn       func(name string, opts *imap.CreateOptions) error
+	renameFn       func(oldName, newName string, opts *imap.RenameOptions) error
+	deleteFn       func(name string) error
 	closeFn        func() error
 }
 
@@ -159,6 +164,15 @@ func (m *mockConnector) Expunge() error {
 	return nil
 }
 
+func (m *mockConnector) SupportsUIDExpunge() bool { return m.uidExpunge }
+
+func (m *mockConnector) UIDExpunge(uids imap.UIDSet) error {
+	if m.uidExpungeFn != nil {
+		return m.uidExpungeFn(uids)
+	}
+	return nil
+}
+
 func (m *mockConnector) Append(
 	mailbox string, literal []byte, opts *imap.AppendOptions,
 ) (*imap.AppendData, error) {
@@ -174,6 +188,20 @@ func (m *mockConnector) Create(name string, opts *imap.CreateOptions) error {
 		return m.createFn(name, opts)
 	}
 
+	return nil
+}
+
+func (m *mockConnector) Rename(oldName, newName string, opts *imap.RenameOptions) error {
+	if m.renameFn != nil {
+		return m.renameFn(oldName, newName, opts)
+	}
+	return nil
+}
+
+func (m *mockConnector) Delete(name string) error {
+	if m.deleteFn != nil {
+		return m.deleteFn(name)
+	}
 	return nil
 }
 
@@ -743,8 +771,10 @@ func TestClient_DeleteMessage_Permanent(t *testing.T) {
 
 	storeCalled := false
 	expungeCalled := false
+	uidExpungeCalled := false
 
 	mock := &mockConnector{
+		uidExpunge: true,
 		storeFn: func(_ imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
 			storeCalled = true
 
@@ -757,6 +787,13 @@ func TestClient_DeleteMessage_Permanent(t *testing.T) {
 		expungeFn: func() error {
 			expungeCalled = true
 
+			return nil
+		},
+		uidExpungeFn: func(uids imap.UIDSet) error {
+			uidExpungeCalled = true
+			if len(uids) != 1 || uids[0].Start != 42 || uids[0].Stop != 42 {
+				t.Errorf("UIDExpunge() = %v, want only UID 42", uids)
+			}
 			return nil
 		},
 	}
@@ -772,8 +809,11 @@ func TestClient_DeleteMessage_Permanent(t *testing.T) {
 		t.Error("Store was not called")
 	}
 
-	if !expungeCalled {
-		t.Error("Expunge was not called")
+	if !uidExpungeCalled {
+		t.Error("UIDExpunge was not called for permanent delete")
+	}
+	if expungeCalled {
+		t.Error("global Expunge must not be called during permanent delete")
 	}
 }
 
@@ -812,6 +852,7 @@ func TestClient_DeleteMessage_StoreError(t *testing.T) {
 	t.Parallel()
 
 	mock := &mockConnector{
+		uidExpunge: true,
 		storeFn: func(_ imap.NumSet, _ *imap.StoreFlags, _ *imap.StoreOptions) error {
 			return errTestStore
 		},
@@ -1416,12 +1457,19 @@ func TestClient_DeleteDraft_Happy(t *testing.T) {
 	selectMailbox := ""
 
 	mock := &mockConnector{
-		listFn:   standardListFn(),
-		statusFn: standardStatusFn(),
+		uidExpunge: true,
+		listFn:     standardListFn(),
+		statusFn:   standardStatusFn(),
 		selectFn: func(mailbox string, _ *imap.SelectOptions) (*imap.SelectData, error) {
 			selectMailbox = mailbox
 
 			return &imap.SelectData{}, nil
+		},
+		uidExpungeFn: func(uids imap.UIDSet) error {
+			if len(uids) != 1 || uids[0].Start != 42 || uids[0].Stop != 42 {
+				t.Errorf("UIDExpunge() = %v, want only UID 42", uids)
+			}
+			return nil
 		},
 	}
 
@@ -1434,6 +1482,40 @@ func TestClient_DeleteDraft_Happy(t *testing.T) {
 
 	if selectMailbox != testMailboxDrafts {
 		t.Errorf("expected Drafts mailbox, got %q", selectMailbox)
+	}
+}
+
+func TestClient_DeleteDraft_WithoutUIDExpungeMovesOnlyUIDToTrash(t *testing.T) {
+	t.Parallel()
+	var moved bool
+	conn := &mockConnector{
+		listFn: standardListFn(), statusFn: standardStatusFn(),
+		moveFn: func(uids imap.UIDSet, dest string) error {
+			moved = dest == "Trash" && len(uids) == 1 && uids[0].Start == 42 && uids[0].Stop == 42
+			return nil
+		},
+		expungeFn: func() error { t.Fatal("global EXPUNGE must not be called"); return nil },
+	}
+	if err := newMockClient(conn).DeleteDraft(t.Context(), 42); err != nil {
+		t.Fatal(err)
+	}
+	if !moved {
+		t.Fatal("expected only draft UID 42 to be moved to Trash")
+	}
+}
+
+func TestClient_DeleteDraft_WithoutUIDExpungeAndTrashReturnsError(t *testing.T) {
+	t.Parallel()
+	conn := &mockConnector{
+		listFn: func(_, _ string, _ *imap.ListOptions) ([]*imap.ListData, error) {
+			return []*imap.ListData{{Mailbox: testMailboxDrafts}}, nil
+		},
+		statusFn: standardStatusFn(),
+		moveFn:   func(imap.UIDSet, string) error { t.Fatal("must not move without resolved Trash"); return nil },
+	}
+	err := newMockClient(conn).DeleteDraft(t.Context(), 42)
+	if err == nil || !strings.Contains(err.Error(), "without UID EXPUNGE and Trash") {
+		t.Fatalf("expected clear missing-Trash error, got %v", err)
 	}
 }
 
@@ -2112,18 +2194,53 @@ func TestClient_DeleteMessage_MoveError(t *testing.T) {
 	}
 }
 
-func TestClient_DeleteMessage_ExpungeError(t *testing.T) {
+func TestClient_DeleteMessage_UsesUIDExpungeAndNeverGlobalExpunge(t *testing.T) {
 	t.Parallel()
 
+	expungeCalled := false
+	uidExpungeCalled := false
 	mc := &mockConnector{
-		expungeFn: func() error { return errTestClose },
+		uidExpunge: true,
+		storeFn: func(_ imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
+			if flags.Op != imap.StoreFlagsAdd || len(flags.Flags) != 1 || flags.Flags[0] != imap.FlagDeleted {
+				t.Fatalf("unexpected STORE flags: %#v", flags)
+			}
+			return nil
+		},
+		uidExpungeFn: func(uids imap.UIDSet) error {
+			uidExpungeCalled = true
+			if len(uids) != 1 || uids[0].Start != 42 || uids[0].Stop != 42 {
+				t.Fatalf("UIDExpunge() = %v, want only UID 42", uids)
+			}
+			return nil
+		},
+		expungeFn: func() error { expungeCalled = true; return errTestClose },
 	}
 
 	client := newMockClient(mc)
 
 	err := client.DeleteMessage(context.Background(), testMailboxINBOX, 42, true)
-	if err == nil {
-		t.Fatal("expected error from Expunge in permanent delete")
+	if err != nil {
+		t.Fatalf("permanent delete failed: %v", err)
+	}
+	if !uidExpungeCalled || expungeCalled {
+		t.Fatalf("UIDExpunge=%v, global Expunge=%v", uidExpungeCalled, expungeCalled)
+	}
+}
+
+func TestClient_DeleteMessage_UnsupportedUIDExpungeDoesNotClaimSuccess(t *testing.T) {
+	t.Parallel()
+	storeCalled := false
+	client := newMockClient(&mockConnector{storeFn: func(imap.NumSet, *imap.StoreFlags, *imap.StoreOptions) error {
+		storeCalled = true
+		return nil
+	}})
+	err := client.DeleteMessage(context.Background(), testMailboxINBOX, 42, true)
+	if err == nil || !strings.Contains(err.Error(), "requires IMAP UIDPLUS or IMAP4rev2") {
+		t.Fatalf("expected unsupported safe-expunge error, got %v", err)
+	}
+	if storeCalled {
+		t.Fatal("message must not be marked deleted when safe UID expunge is unavailable")
 	}
 }
 
@@ -2402,6 +2519,115 @@ func TestClient_GetDraft_FetchError(t *testing.T) {
 	_, err := client.GetDraft(context.Background(), 42)
 	if err == nil {
 		t.Fatal("expected error from fetch")
+	}
+}
+
+func TestClient_UpdateDraftAppendsThenDeletesOldUIDWithoutExpunge(t *testing.T) {
+	t.Parallel()
+	var appended bool
+	var storedUID imap.UID
+	conn := &mockConnector{
+		uidExpunge: true,
+		listFn: func(_, _ string, _ *imap.ListOptions) ([]*imap.ListData, error) {
+			return []*imap.ListData{{Mailbox: testMailboxDrafts, Attrs: []imap.MailboxAttr{imap.MailboxAttrDrafts}}}, nil
+		},
+		appendFn: func(mailbox string, literal []byte, _ *imap.AppendOptions) (*imap.AppendData, error) {
+			if mailbox != testMailboxDrafts || string(literal) != "replacement" {
+				t.Fatalf("unexpected append")
+			}
+			appended = true
+			return &imap.AppendData{UID: 88}, nil
+		},
+		storeFn: func(set imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
+			if !appended || flags.Op != imap.StoreFlagsAdd || len(flags.Flags) != 1 || flags.Flags[0] != imap.FlagDeleted {
+				t.Fatalf("unexpected store flags: %+v", flags)
+			}
+			storedUID = set.(imap.UIDSet)[0].Start
+			return nil
+		},
+		uidExpungeFn: func(uids imap.UIDSet) error {
+			if len(uids) != 1 || uids[0].Start != 42 || uids[0].Stop != 42 {
+				t.Fatalf("UIDExpunge() = %v, want UID 42", uids)
+			}
+			return nil
+		},
+		expungeFn: func() error { t.Fatal("global expunge must not be called"); return nil },
+	}
+	client := newMockClient(conn)
+	uid, err := client.UpdateDraft(t.Context(), 42, []byte("replacement"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uid != 88 || storedUID != 42 {
+		t.Fatalf("uid=%d stored=%d", uid, storedUID)
+	}
+}
+
+func TestClient_UpdateDraft_WithoutUIDExpungeMovesOldUIDToTrash(t *testing.T) {
+	t.Parallel()
+	var appended, moved bool
+	conn := &mockConnector{
+		listFn: standardListFn(), statusFn: standardStatusFn(),
+		appendFn: func(mailbox string, literal []byte, _ *imap.AppendOptions) (*imap.AppendData, error) {
+			appended = mailbox == testMailboxDrafts && string(literal) == "replacement"
+			return &imap.AppendData{UID: 88}, nil
+		},
+		moveFn: func(uids imap.UIDSet, dest string) error {
+			moved = appended && dest == "Trash" && len(uids) == 1 && uids[0].Start == 42 && uids[0].Stop == 42
+			return nil
+		},
+		expungeFn: func() error { t.Fatal("global EXPUNGE must not be called"); return nil },
+	}
+	uid, err := newMockClient(conn).UpdateDraft(t.Context(), 42, []byte("replacement"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uid != 88 || !moved {
+		t.Fatalf("replacement UID=%d, old draft moved=%v", uid, moved)
+	}
+}
+
+func TestClient_UpdateDraft_WithoutUIDExpungeAndTrashDoesNotAppend(t *testing.T) {
+	t.Parallel()
+	appended := false
+	conn := &mockConnector{
+		listFn: func(_, _ string, _ *imap.ListOptions) ([]*imap.ListData, error) {
+			return []*imap.ListData{{Mailbox: testMailboxDrafts}}, nil
+		},
+		statusFn: standardStatusFn(),
+		appendFn: func(string, []byte, *imap.AppendOptions) (*imap.AppendData, error) {
+			appended = true
+			return &imap.AppendData{UID: 88}, nil
+		},
+	}
+	_, err := newMockClient(conn).UpdateDraft(t.Context(), 42, []byte("replacement"))
+	if err == nil || !strings.Contains(err.Error(), "without UID EXPUNGE and Trash") {
+		t.Fatalf("expected clear missing-Trash error, got %v", err)
+	}
+	if appended {
+		t.Fatal("must not append replacement when no safe cleanup target exists")
+	}
+}
+
+func TestClient_RenameAndDeleteFolder(t *testing.T) {
+	t.Parallel()
+	var renamed, deleted bool
+	conn := &mockConnector{
+		renameFn: func(oldName, newName string, _ *imap.RenameOptions) error {
+			renamed = oldName == "Old" && newName == "New"
+			return nil
+		},
+		deleteFn: func(name string) error { deleted = name == "New"; return nil },
+	}
+	client := newMockClient(conn)
+	if err := client.RenameFolder(t.Context(), "Old", "New"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeleteFolder(t.Context(), "New"); err != nil {
+		t.Fatal(err)
+	}
+	if !renamed || !deleted {
+		t.Fatalf("renamed=%v deleted=%v", renamed, deleted)
 	}
 }
 

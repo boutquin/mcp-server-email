@@ -97,6 +97,46 @@ func TestPool_Get_AfterClose(t *testing.T) {
 	}
 }
 
+func TestPool_CloseSynchronizesOperationRegistration(t *testing.T) {
+	t.Parallel()
+	pool := newTestPool(t, &mockConnector{})
+	if !pool.beginOperation() {
+		t.Fatal("expected operation registration to succeed")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		pool.Close(context.Background())
+		close(closed)
+	}()
+
+	deadline := time.After(time.Second)
+	for !pool.closing.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("Close did not set closing state")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if pool.beginOperation() {
+		pool.wg.Done()
+		t.Fatal("operation registered after Close started")
+	}
+
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a registered operation was still active")
+	default:
+	}
+	pool.wg.Done()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after operation completed")
+	}
+}
+
 func TestPool_Get_CreatesNewClient(t *testing.T) {
 	t.Parallel()
 
@@ -149,6 +189,63 @@ func TestPool_Get_FactoryError(t *testing.T) {
 	_, err := pool.Get(context.Background(), testAccountID)
 	if !errors.Is(err, errTestPool) {
 		t.Errorf("expected errTestPool, got: %v", err)
+	}
+}
+
+func TestPool_GetCreationFinishingAfterCloseIsDiscarded(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		DefaultAccount: testAccountID,
+		Accounts:       []config.Account{{ID: testAccountID, IMAPHost: "localhost", IMAPPort: 993}},
+	}
+	pool := NewPool(cfg)
+	creationStarted := make(chan struct{})
+	allowCreationFinish := make(chan struct{})
+	clientClosed := make(chan struct{})
+	pool.newClientFunc = func(context.Context, *config.Account, *config.Config) (*Client, error) {
+		<-creationStarted // ensure this factory is the one started below
+		<-allowCreationFinish
+		client := newMockClient(&mockConnector{closeFn: func() error { close(clientClosed); return nil }})
+		return client, nil
+	}
+	close(creationStarted)
+	getResult := make(chan error, 1)
+	go func() {
+		_, err := pool.Get(context.Background(), testAccountID)
+		getResult <- err
+	}()
+
+	deadline := time.After(time.Second)
+	for {
+		pool.mu.Lock()
+		creating := pool.inflight[testAccountID] != nil
+		pool.mu.Unlock()
+		if creating {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("Get did not start client creation")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pool.Close(ctx)
+	close(allowCreationFinish)
+	if err := <-getResult; !errors.Is(err, ErrPoolClosed) {
+		t.Fatalf("Get() error = %v, want ErrPoolClosed", err)
+	}
+	select {
+	case <-clientClosed:
+	case <-time.After(time.Second):
+		t.Fatal("late client connection was not closed")
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if len(pool.clients) != 0 {
+		t.Fatalf("late client was stored after close: %d clients", len(pool.clients))
 	}
 }
 
@@ -838,10 +935,16 @@ func TestPool_DeleteMessage_Success(t *testing.T) {
 	t.Parallel()
 
 	mc := &mockConnector{
+		uidExpunge: true,
 		storeFn: func(_ imap.NumSet, _ *imap.StoreFlags, _ *imap.StoreOptions) error {
 			return nil
 		},
-		expungeFn: func() error { return nil },
+		uidExpungeFn: func(uids imap.UIDSet) error {
+			if len(uids) != 1 || uids[0].Start != 42 || uids[0].Stop != 42 {
+				t.Errorf("UIDExpunge() = %v, want only UID 42", uids)
+			}
+			return nil
+		},
 	}
 
 	pool := newTestPool(t, mc)
@@ -1148,8 +1251,15 @@ func TestPool_DeleteDraft_Success(t *testing.T) {
 	t.Parallel()
 
 	mc := &mockConnector{
-		listFn:   standardListFn(),
-		statusFn: standardStatusFn(),
+		uidExpunge: true,
+		listFn:     standardListFn(),
+		statusFn:   standardStatusFn(),
+		uidExpungeFn: func(uids imap.UIDSet) error {
+			if len(uids) != 1 || uids[0].Start != 42 || uids[0].Stop != 42 {
+				t.Errorf("UIDExpunge() = %v, want only UID 42", uids)
+			}
+			return nil
+		},
 	}
 
 	pool := newTestPool(t, mc)
@@ -1164,8 +1274,9 @@ func TestPool_DeleteDraft_Error(t *testing.T) {
 	t.Parallel()
 
 	mc := &mockConnector{
-		listFn:   standardListFn(),
-		statusFn: standardStatusFn(),
+		uidExpunge: true,
+		listFn:     standardListFn(),
+		statusFn:   standardStatusFn(),
 		storeFn: func(_ imap.NumSet, _ *imap.StoreFlags, _ *imap.StoreOptions) error {
 			return errTestPool
 		},
@@ -1187,6 +1298,54 @@ func TestPool_DeleteDraft_UnknownAccount(t *testing.T) {
 	err := pool.DeleteDraft(context.Background(), "bad", 42)
 	if !errors.Is(err, models.ErrAccountNotFound) {
 		t.Errorf("expected ErrAccountNotFound, got: %v", err)
+	}
+}
+
+func TestPool_UpdateDraft_Success(t *testing.T) {
+	t.Parallel()
+	mc := &mockConnector{
+		listFn: standardListFn(), statusFn: standardStatusFn(),
+		appendFn: func(_ string, _ []byte, _ *imap.AppendOptions) (*imap.AppendData, error) {
+			return &imap.AppendData{UID: 101}, nil
+		},
+	}
+	pool := newTestPool(t, mc)
+	uid, err := pool.UpdateDraft(t.Context(), testAccountID, 42, []byte("replacement"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uid != 101 {
+		t.Fatalf("uid=%d, want 101", uid)
+	}
+}
+
+func TestPool_RenameFolder_Success(t *testing.T) {
+	t.Parallel()
+	called := false
+	pool := newTestPool(t, &mockConnector{renameFn: func(oldName, newName string, _ *imap.RenameOptions) error {
+		called = oldName == "Old" && newName == "New"
+		return nil
+	}})
+	if err := pool.RenameFolder(t.Context(), testAccountID, "Old", "New"); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("rename was not forwarded")
+	}
+}
+
+func TestPool_DeleteFolder_Success(t *testing.T) {
+	t.Parallel()
+	called := false
+	pool := newTestPool(t, &mockConnector{deleteFn: func(name string) error {
+		called = name == "Old"
+		return nil
+	}})
+	if err := pool.DeleteFolder(t.Context(), testAccountID, "Old"); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("delete was not forwarded")
 	}
 }
 

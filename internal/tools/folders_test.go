@@ -246,3 +246,82 @@ func TestFolderCreateHandler_AccountNotFound(t *testing.T) {
 		t.Errorf("expected 'account not found' error, got %q", text)
 	}
 }
+
+func TestFolderRenameHandler_HappyPath(t *testing.T) {
+	t.Parallel()
+	mock := &mockIMAPOps{defaultAccountID: testDefaultAccount}
+	result, err := tools.FolderRenameHandler(mock)(t.Context(), toolReq(map[string]any{
+		"name": "Old", "newName": "New",
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("result=%v err=%v", result, err)
+	}
+	if mock.lastRenameFolderArgs.accountID != testDefaultAccount ||
+		mock.lastRenameFolderArgs.oldName != "Old" || mock.lastRenameFolderArgs.newName != "New" {
+		t.Fatalf("unexpected rename args: %+v", mock.lastRenameFolderArgs)
+	}
+}
+
+func TestFolderDeleteHandler_HappyPath(t *testing.T) {
+	t.Parallel()
+	mock := &mockIMAPOps{defaultAccountID: testDefaultAccount}
+	result, err := tools.FolderDeleteHandler(mock)(t.Context(), toolReq(map[string]any{"name": "Old"}))
+	if err != nil || result.IsError {
+		t.Fatalf("result=%v err=%v", result, err)
+	}
+	if mock.lastDeleteFolderArgs.accountID != testDefaultAccount || mock.lastDeleteFolderArgs.name != "Old" {
+		t.Fatalf("unexpected delete args: %+v", mock.lastDeleteFolderArgs)
+	}
+}
+
+func TestFolderDeleteHandler_RejectsProtectedNames(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"INBOX", "inbox", "Drafts", "sent", "TRASH"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			mock := &mockIMAPOps{defaultAccountID: testDefaultAccount}
+			result, err := tools.FolderDeleteHandler(mock)(t.Context(), toolReq(map[string]any{"name": name}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.IsError || !strings.Contains(resultText(t, result), "protected folder") {
+				t.Fatalf("expected protected-folder rejection, got %s", resultText(t, result))
+			}
+			if mock.lastDeleteFolderArgs.name != "" {
+				t.Fatal("DeleteFolder must not be called")
+			}
+		})
+	}
+}
+
+func TestFolderDeleteHandler_RejectsResolvedSpecialUseAlias(t *testing.T) {
+	t.Parallel()
+	mock := &mockIMAPOps{
+		defaultAccountID: testDefaultAccount,
+		getFolderByRoleFunc: func(_ string, role models.FolderRole) (string, error) {
+			switch role {
+			case models.RoleDrafts:
+				return "[Gmail]/Drafts", nil
+			case models.RoleSent:
+				return "[Gmail]/Sent Mail", nil
+			case models.RoleTrash:
+				return "[Gmail]/Bin", nil
+			default:
+				return "", models.ErrFolderRoleNotFound
+			}
+		},
+	}
+	for _, name := range []string{"[Gmail]/Drafts", "[gmail]/sent mail", "[GMAIL]/BIN"} {
+		result, err := tools.FolderDeleteHandler(mock)(t.Context(), toolReq(map[string]any{"name": name}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.IsError || !strings.Contains(resultText(t, result), "protected folder") {
+			t.Fatalf("%q: expected protected-folder rejection, got %s", name, resultText(t, result))
+		}
+	}
+	if mock.lastDeleteFolderArgs.name != "" {
+		t.Fatal("DeleteFolder must not be called")
+	}
+}

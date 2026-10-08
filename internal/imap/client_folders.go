@@ -26,6 +26,50 @@ func (c *Client) CreateFolder(ctx context.Context, name string) error {
 	})
 }
 
+// RenameFolder renames a mailbox and invalidates cached special-use roles.
+func (c *Client) RenameFolder(ctx context.Context, oldName, newName string) error {
+	err := c.retryOp(ctx, func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.conn == nil {
+			return errConnectionNil
+		}
+		if err := c.conn.Rename(oldName, newName, nil); err != nil {
+			return fmt.Errorf("rename folder: %w", err)
+		}
+		c.lastActive = time.Now()
+		return nil
+	})
+	if err == nil {
+		c.folderRoleMu.Lock()
+		c.folderRoles = nil
+		c.folderRoleMu.Unlock()
+	}
+	return err
+}
+
+// DeleteFolder deletes a mailbox and invalidates cached special-use roles.
+func (c *Client) DeleteFolder(ctx context.Context, name string) error {
+	err := c.retryOp(ctx, func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.conn == nil {
+			return errConnectionNil
+		}
+		if err := c.conn.Delete(name); err != nil {
+			return fmt.Errorf("delete folder: %w", err)
+		}
+		c.lastActive = time.Now()
+		return nil
+	})
+	if err == nil {
+		c.folderRoleMu.Lock()
+		c.folderRoles = nil
+		c.folderRoleMu.Unlock()
+	}
+	return err
+}
+
 // ListFolders returns all mailboxes for the account.
 // Uses STATUS-only (no Select) for O(n) roundtrips instead of O(2n).
 func (c *Client) ListFolders(ctx context.Context) ([]models.Folder, error) {

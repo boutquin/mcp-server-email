@@ -32,9 +32,11 @@ func RegisterAll(
 	// Account tools (1)
 	s.AddTool(AccountsTool(), AccountsHandler(imapOps))
 
-	// Folder tools (2)
+	// Folder tools (4)
 	s.AddTool(FoldersTool(), FoldersHandler(imapOps))
 	s.AddTool(FolderCreateTool(), FolderCreateHandler(imapOps))
+	s.AddTool(FolderRenameTool(), FolderRenameHandler(imapOps))
+	s.AddTool(FolderDeleteTool(), FolderDeleteHandler(imapOps))
 
 	// Message list tools (3)
 	s.AddTool(ListTool(), ListHandler(imapOps))
@@ -53,9 +55,12 @@ func RegisterAll(
 	s.AddTool(FlagTool(), FlagHandler(imapOps))
 
 	// Send tools (3)
-	s.AddTool(SendTool(), SendHandler(smtpOps, limits))
+	s.AddTool(SendTool(), SendHandler(smtpOps, limits, imapOps))
 	s.AddTool(DraftCreateTool(), DraftCreateHandler(imapOps, smtpOps, limits))
 	s.AddTool(DraftSendTool(), DraftSendHandler(imapOps, smtpOps))
+	s.AddTool(DraftListTool(), DraftListHandler(imapOps))
+	s.AddTool(DraftUpdateTool(), DraftUpdateHandler(imapOps))
+	s.AddTool(DraftDeleteTool(), DraftDeleteHandler(imapOps))
 
 	// Reply/Forward tools (2)
 	s.AddTool(ReplyTool(), ReplyHandler(imapOps, smtpOps))

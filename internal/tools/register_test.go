@@ -75,7 +75,7 @@ func TestRegisterAll(t *testing.T) {
 	tools.RegisterAll(s, imapMock, smtpMock, testLimits)
 
 	// Verify expected tool count matches actual registrations.
-	const expectedTools = 22
+	const expectedTools = 27
 
 	registered := s.ListTools()
 	if len(registered) != expectedTools {

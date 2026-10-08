@@ -232,9 +232,9 @@ func TestSmtpIsRetryable(t *testing.T) {
 		t.Error("smtpIsRetryable(nil) should return false")
 	}
 
-	// Test context.DeadlineExceeded
-	if !smtpIsRetryable(context.DeadlineExceeded) {
-		t.Error("smtpIsRetryable(context.DeadlineExceeded) should return true")
+	// A timeout can happen after DATA was accepted, so retrying could duplicate mail.
+	if smtpIsRetryable(context.DeadlineExceeded) {
+		t.Error("smtpIsRetryable(context.DeadlineExceeded) should return false")
 	}
 }
 
@@ -270,58 +270,27 @@ func TestSmtpIsRetryable_FalsePositives(t *testing.T) {
 	}
 }
 
-func TestClient_WithTimeout_Success(t *testing.T) {
+func TestIsAmbiguousDeliveryError_Deadline(t *testing.T) {
 	t.Parallel()
 
-	client := &Client{
-		timeout: 5 * time.Second,
-	}
-
-	err := client.withTimeout(context.Background(), func() error {
-		return nil
-	})
-	if err != nil {
-		t.Errorf("expected nil error, got: %v", err)
+	if !isAmbiguousDeliveryError(context.DeadlineExceeded) {
+		t.Error("deadline exceeded must be treated as an ambiguous delivery result")
 	}
 }
 
-func TestClient_WithTimeout_OpError(t *testing.T) {
+func TestIsAmbiguousDeliveryError_SMTPStatus(t *testing.T) {
 	t.Parallel()
 
-	client := &Client{
-		timeout: 5 * time.Second,
-	}
-
-	err := client.withTimeout(context.Background(), func() error {
-		return &testError{msg: "operation failed"}
-	})
-	if err == nil {
-		t.Error("expected error, got nil")
-	}
-
-	if !strings.Contains(err.Error(), "operation failed") {
-		t.Errorf("expected 'operation failed' in error, got: %v", err)
+	if isAmbiguousDeliveryError(errTest550Mailbox) {
+		t.Error("an SMTP status response has a known outcome")
 	}
 }
 
-func TestClient_WithTimeout_Exceeded(t *testing.T) {
+func TestSMTPIsRetryable_DeliveryUnknown(t *testing.T) {
 	t.Parallel()
 
-	client := &Client{
-		timeout: 50 * time.Millisecond,
-	}
-
-	err := client.withTimeout(context.Background(), func() error {
-		time.Sleep(2 * time.Second)
-
-		return nil
-	})
-	if err == nil {
-		t.Error("expected timeout error, got nil")
-	}
-
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Errorf("expected 'timed out' in error, got: %v", err)
+	if smtpIsRetryable(fmt.Errorf("%w: timeout", ErrDeliveryUnknown)) {
+		t.Error("unknown delivery result must not be retried")
 	}
 }
 

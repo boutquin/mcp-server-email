@@ -21,6 +21,7 @@ func SearchTool() mcp.Tool {
 		mcp.WithString("since", mcp.Description("Messages since date (YYYY-MM-DD)")),
 		mcp.WithString("before", mcp.Description("Messages before date (YYYY-MM-DD)")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 50, max 500)")),
+		mcp.WithNumber("offset", mcp.Description("Results to skip for pagination (default 0)")),
 		mcp.WithBoolean("includeBody", mcp.Description("Include message body (default false)")),
 	)
 }
@@ -70,6 +71,7 @@ func SearchHandler(ops imap.Operations) server.ToolHandlerFunc {
 		since := req.GetString("since", "")
 		before := req.GetString("before", "")
 		limit := req.GetInt("limit", defaultLimit)
+		offset := req.GetInt("offset", 0)
 		includeBody := req.GetBool("includeBody", false)
 
 		if limit > maxLimit {
@@ -80,11 +82,16 @@ func SearchHandler(ops imap.Operations) server.ToolHandlerFunc {
 			limit = defaultLimit
 		}
 
+		if offset < 0 || offset >= maxLimit {
+			return mcp.NewToolResultError("offset must be between 0 and 499"), nil
+		}
+
 		if errMsg := validateDateRange(since, before); errMsg != "" {
 			return mcp.NewToolResultError(errMsg), nil
 		}
 
-		emails, err := ops.Search(ctx, accountID, folder, query, from, to, since, before, limit, includeBody)
+		fetchLimit := min(maxLimit, offset+limit+1)
+		emails, err := ops.Search(ctx, accountID, folder, query, from, to, since, before, fetchLimit, includeBody)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -93,12 +100,25 @@ func SearchHandler(ops imap.Operations) server.ToolHandlerFunc {
 			convertHTMLBodies(emails)
 		}
 
+		if offset >= len(emails) {
+			emails = nil
+		} else {
+			emails = emails[offset:]
+		}
+
+		hasMore := len(emails) > limit
+		if hasMore {
+			emails = emails[:limit]
+		}
+
 		return jsonResult(map[string]any{
 			"account":  accountID,
 			"folder":   folder,
 			"query":    query,
 			"messages": emails,
 			"count":    len(emails),
+			"offset":   offset,
+			"has_more": hasMore,
 		}), nil
 	}
 }

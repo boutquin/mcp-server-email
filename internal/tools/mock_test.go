@@ -33,11 +33,17 @@ type mockIMAPOps struct {
 	markReadErr           error
 	setFlagErr            error
 	createFolderErr       error
+	renameFolderErr       error
+	deleteFolderErr       error
 	saveDraftUID          uint32
 	saveDraftErr          error
 	getDraftResult        []byte
 	getDraftErr           error
 	deleteDraftErr        error
+	updateDraftUID        uint32
+	updateDraftErr        error
+	appendSentErr         error
+	lastAppendSentArgs    saveDraftArgs
 	getAttachmentsResult  []models.AttachmentInfo
 	getAttachmentsErr     error
 	getAttachmentData     []byte
@@ -65,13 +71,17 @@ type mockIMAPOps struct {
 	lastMarkReadArgs         markReadArgs
 	lastSetFlagArgs          setFlagArgs
 	lastCreateFolderArgs     createFolderArgs
+	lastRenameFolderArgs     renameFolderArgs
+	lastDeleteFolderArgs     createFolderArgs
 	lastSaveDraftArgs        saveDraftArgs
 	lastDeleteDraftArgs      deleteDraftArgs
+	lastUpdateDraftArgs      updateDraftArgs
 	lastGetAttachmentsArgs   getAttachmentsArgs
 	lastGetAttachmentArgs    getAttachmentArgs
 
 	// Call tracking.
 	accountStatusCalled bool
+	deleteDraftCalls    int
 }
 
 type listMessagesArgs struct {
@@ -147,6 +157,13 @@ type createFolderArgs struct {
 	name      string
 }
 
+type renameFolderArgs struct{ accountID, oldName, newName string }
+type updateDraftArgs struct {
+	accountID string
+	uid       uint32
+	msg       []byte
+}
+
 type saveDraftArgs struct {
 	accountID string
 	msg       []byte
@@ -183,7 +200,17 @@ func (m *mockIMAPOps) GetFolderByRole(
 		return m.getFolderByRoleFunc(accountID, role)
 	}
 
-	return m.getFolderByRoleResult, m.getFolderByRoleErr
+	if m.getFolderByRoleResult != "" || m.getFolderByRoleErr != nil {
+		return m.getFolderByRoleResult, m.getFolderByRoleErr
+	}
+	switch role {
+	case models.RoleDrafts:
+		return "Drafts", nil
+	case models.RoleSent:
+		return "Sent", nil
+	default:
+		return "", models.ErrFolderRoleNotFound
+	}
 }
 
 func (m *mockIMAPOps) ListMessages(
@@ -259,10 +286,25 @@ func (m *mockIMAPOps) CreateFolder(_ context.Context, accountID, name string) er
 	return m.createFolderErr
 }
 
+func (m *mockIMAPOps) RenameFolder(_ context.Context, accountID, oldName, newName string) error {
+	m.lastRenameFolderArgs = renameFolderArgs{accountID, oldName, newName}
+	return m.renameFolderErr
+}
+
+func (m *mockIMAPOps) DeleteFolder(_ context.Context, accountID, name string) error {
+	m.lastDeleteFolderArgs = createFolderArgs{accountID, name}
+	return m.deleteFolderErr
+}
+
 func (m *mockIMAPOps) SaveDraft(_ context.Context, accountID string, msg []byte) (uint32, error) {
 	m.lastSaveDraftArgs = saveDraftArgs{accountID, msg}
 
 	return m.saveDraftUID, m.saveDraftErr
+}
+
+func (m *mockIMAPOps) UpdateDraft(_ context.Context, accountID string, uid uint32, msg []byte) (uint32, error) {
+	m.lastUpdateDraftArgs = updateDraftArgs{accountID, uid, append([]byte(nil), msg...)}
+	return m.updateDraftUID, m.updateDraftErr
 }
 
 func (m *mockIMAPOps) GetDraft(_ context.Context, accountID string, uid uint32) ([]byte, error) {
@@ -272,9 +314,15 @@ func (m *mockIMAPOps) GetDraft(_ context.Context, accountID string, uid uint32) 
 }
 
 func (m *mockIMAPOps) DeleteDraft(_ context.Context, accountID string, uid uint32) error {
+	m.deleteDraftCalls++
 	m.lastDeleteDraftArgs = deleteDraftArgs{accountID, uid}
 
 	return m.deleteDraftErr
+}
+
+func (m *mockIMAPOps) AppendSent(_ context.Context, accountID string, msg []byte) error {
+	m.lastAppendSentArgs = saveDraftArgs{accountID, append([]byte(nil), msg...)}
+	return m.appendSentErr
 }
 
 func (m *mockIMAPOps) GetAttachments(
@@ -326,7 +374,8 @@ type mockSMTPOps struct {
 	accountEmailErr  error
 
 	// Return values.
-	sendErr error
+	sendErr  error
+	sentCopy []byte
 
 	// Captured arguments.
 	lastSendAccountID string
@@ -334,14 +383,30 @@ type mockSMTPOps struct {
 
 	// Call tracking.
 	sendCalled bool
+	sendCalls  int
 }
 
 func (m *mockSMTPOps) Send(_ context.Context, accountID string, req *smtp.SendRequest) error {
 	m.sendCalled = true
+	m.sendCalls++
 	m.lastSendAccountID = accountID
 	m.lastSendReq = req
 
 	return m.sendErr
+}
+
+func (m *mockSMTPOps) SendWithCopy(_ context.Context, accountID string, req *smtp.SendRequest) ([]byte, error) {
+	m.sendCalled = true
+	m.sendCalls++
+	m.lastSendAccountID = accountID
+	m.lastSendReq = req
+	if m.sendErr != nil {
+		return nil, m.sendErr
+	}
+	if m.sentCopy != nil {
+		return append([]byte(nil), m.sentCopy...), nil
+	}
+	return []byte("From: sender@example.com\r\n\r\nmock body"), nil
 }
 
 func (m *mockSMTPOps) AccountEmail(accountID string) (string, error) {

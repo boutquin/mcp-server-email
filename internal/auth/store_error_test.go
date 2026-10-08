@@ -3,6 +3,7 @@ package auth //nolint:testpackage // tests access unexported baseDir field
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -35,6 +36,9 @@ func TestNewTokenStore_MkdirAllError(t *testing.T) {
 
 func TestTokenStore_Save_CreateTempError(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not reliably make directories read-only on Windows")
+	}
 
 	// Create a store with a valid directory, then make it read-only.
 	dir := t.TempDir()

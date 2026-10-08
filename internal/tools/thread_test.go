@@ -2,6 +2,7 @@ package tools_test
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -564,8 +565,35 @@ func TestThreadHandler_CrossFolder_LargeThread(t *testing.T) {
 // --- Helpers ---
 
 type threadResult struct {
-	Thread []models.Email `json:"thread"`
-	Count  int            `json:"count"`
+	Thread  []models.Email `json:"thread"`
+	Count   int            `json:"count"`
+	Partial bool           `json:"partial"`
+	Errors  []string       `json:"errors"`
+}
+
+func TestThreadHandler_ReportsPartialSearch(t *testing.T) {
+	t.Parallel()
+
+	msg := models.Email{ID: "test:INBOX:1", MessageIDHeader: "<a@ex.com>"}
+	mock := &mockIMAPOps{
+		getMessageResult:      &msg,
+		getFolderByRoleResult: testSent,
+		searchByMessageIDFunc: func(_, folder, _ string) ([]models.Email, error) {
+			if folder == testSent {
+				return nil, errors.New("sent unavailable")
+			}
+			return []models.Email{msg}, nil
+		},
+	}
+
+	result, err := tools.ThreadHandler(mock)(t.Context(), toolReq(map[string]any{"id": "test:INBOX:1"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	parsed := parseThreadResult(t, result)
+	if !parsed.Partial || len(parsed.Errors) == 0 || !strings.Contains(parsed.Errors[0], "sent unavailable") {
+		t.Fatalf("expected partial result with error details, got %+v", parsed)
+	}
 }
 
 func parseThreadResult(t *testing.T, result *mcp.CallToolResult) threadResult {

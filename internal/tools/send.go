@@ -18,6 +18,14 @@ import (
 	"github.com/wneessen/go-mail"
 )
 
+type sentAppender interface {
+	AppendSent(ctx context.Context, accountID string, message []byte) error
+}
+
+// ErrSentButNotArchived indicates SMTP accepted the message but its Sent copy
+// could not be stored. Retrying the send may deliver a duplicate.
+var ErrSentButNotArchived = errors.New("message sent successfully but could not be saved to Sent; do not resend")
+
 // Send parameter validation errors.
 var (
 	errToRequired      = errors.New("to is required")
@@ -95,7 +103,7 @@ func buildSendRequest(req mcp.CallToolRequest, limits AttachmentLimits) (*smtp.S
 }
 
 // SendHandler returns the handler for email_send.
-func SendHandler(ops smtp.Operations, limits AttachmentLimits) server.ToolHandlerFunc {
+func SendHandler(ops smtp.Operations, limits AttachmentLimits, imapOps ...imap.Operations) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		sendReq, err := buildSendRequest(req, limits)
 		if err != nil {
@@ -108,10 +116,14 @@ func SendHandler(ops smtp.Operations, limits AttachmentLimits) server.ToolHandle
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-
-		err = ops.Send(ctx, accountID, sendReq)
+		literal, err := ops.SendWithCopy(ctx, accountID, sendReq)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if len(imapOps) > 0 {
+			if err := appendSentCopy(ctx, imapOps[0], accountID, literal); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
 		}
 
 		return jsonResult(map[string]any{
@@ -191,6 +203,10 @@ func DraftCreateHandler(
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		draftsFolder, err := imapOps.GetFolderByRole(ctx, accountID, models.RoleDrafts)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 
 		// Save the draft via IMAP
 		uid, err := imapOps.SaveDraft(ctx, accountID, literal)
@@ -198,7 +214,7 @@ func DraftCreateHandler(
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		draftID := models.FormatMessageID(accountID, "Drafts", uid)
+		draftID := models.FormatMessageID(accountID, draftsFolder, uid)
 
 		return jsonResult(map[string]any{
 			"success": true,
@@ -229,7 +245,11 @@ func DraftSendHandler(imapOps imap.Operations, smtpOps smtp.Operations) server.T
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		if mailbox != "Drafts" {
+		draftsFolder, err := imapOps.GetFolderByRole(ctx, account, models.RoleDrafts)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if mailbox != draftsFolder {
 			return mcp.NewToolResultError("message is not a draft"), nil
 		}
 
@@ -239,13 +259,11 @@ func DraftSendHandler(imapOps imap.Operations, smtpOps smtp.Operations) server.T
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		// Detect HTML from draft Content-Type by reading the raw message.
-		isHTML := false
-
-		raw, draftErr := imapOps.GetDraft(ctx, account, uid)
-		if draftErr == nil {
-			isHTML = draftContentIsHTML(raw)
+		raw, err := imapOps.GetDraft(ctx, account, uid)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
+		isHTML := draftContentIsHTML(raw)
 
 		// Send via SMTP
 		sendReq := &smtp.SendRequest{
@@ -256,14 +274,24 @@ func DraftSendHandler(imapOps imap.Operations, smtpOps smtp.Operations) server.T
 			Body:    email.Body,
 			IsHTML:  isHTML,
 		}
+		if attachments, attachErr := fetchDraftAttachments(ctx, imapOps, account, mailbox, uid, email.Attachments); attachErr != nil {
+			return mcp.NewToolResultError(attachErr.Error()), nil
+		} else {
+			sendReq.Attachments = attachments
+		}
 
-		err = smtpOps.Send(ctx, account, sendReq)
+		sentCopy, err := smtpOps.SendWithCopy(ctx, account, sendReq)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		if err := appendSentCopy(ctx, imapOps, account, sentCopy); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 
-		// Delete the draft — non-fatal if it fails (message already sent)
-		_ = imapOps.DeleteDraft(ctx, account, uid)
+		// A sent draft remains available for recovery if cleanup fails.
+		if err := imapOps.DeleteDraft(ctx, account, uid); err != nil {
+			return mcp.NewToolResultError("message sent and archived; do not resend; draft cleanup failed: " + err.Error()), nil
+		}
 
 		return jsonResult(map[string]any{
 			"success": true,
@@ -271,6 +299,35 @@ func DraftSendHandler(imapOps imap.Operations, smtpOps smtp.Operations) server.T
 			"to":      email.To,
 		}), nil
 	}
+}
+
+func appendSentCopy(ctx context.Context, imapOps imap.Operations, accountID string, raw []byte) error {
+	appender, ok := any(imapOps).(sentAppender)
+	if !ok {
+		return fmt.Errorf("%w: IMAP Sent append is unavailable", ErrSentButNotArchived)
+	}
+	if err := appender.AppendSent(ctx, accountID, raw); err != nil {
+		return fmt.Errorf("%w: %v", ErrSentButNotArchived, err)
+	}
+	return nil
+}
+
+func fetchDraftAttachments(
+	ctx context.Context, ops imap.Operations, account, mailbox string, uid uint32,
+	metadata []models.AttachmentInfo,
+) ([]smtp.SendAttachment, error) {
+	attachments := make([]smtp.SendAttachment, 0, len(metadata))
+	for _, item := range metadata {
+		data, filename, err := ops.GetAttachment(ctx, account, mailbox, uid, item.Index)
+		if err != nil {
+			return nil, fmt.Errorf("read draft attachment %q: %w", item.Filename, err)
+		}
+		if filename == "" {
+			filename = item.Filename
+		}
+		attachments = append(attachments, smtp.SendAttachment{Filename: filename, Data: data})
+	}
+	return attachments, nil
 }
 
 // SplitAddresses splits a comma-separated string of email addresses into a
@@ -332,6 +389,12 @@ func buildDraftMessage(
 	isHTML bool,
 	attachments []smtp.SendAttachment,
 ) ([]byte, error) {
+	return buildSendMessage(from, &smtp.SendRequest{
+		To: to, CC: cc, BCC: bcc, Subject: subject, Body: body, IsHTML: isHTML, Attachments: attachments,
+	})
+}
+
+func buildSendMessage(from string, req *smtp.SendRequest) ([]byte, error) {
 	m := mail.NewMsg()
 
 	err := m.From(from)
@@ -339,37 +402,55 @@ func buildDraftMessage(
 		return nil, fmt.Errorf("set from: %w", err)
 	}
 
-	if len(to) > 0 {
-		err = m.To(to...)
+	if len(req.To) > 0 {
+		err = m.To(req.To...)
 		if err != nil {
 			return nil, fmt.Errorf("set to: %w", err)
 		}
 	}
 
-	if len(cc) > 0 {
-		err = m.Cc(cc...)
+	if len(req.CC) > 0 {
+		err = m.Cc(req.CC...)
 		if err != nil {
 			return nil, fmt.Errorf("set cc: %w", err)
 		}
 	}
 
-	if len(bcc) > 0 {
-		err = m.Bcc(bcc...)
+	if len(req.BCC) > 0 {
+		err = m.Bcc(req.BCC...)
 		if err != nil {
 			return nil, fmt.Errorf("set bcc: %w", err)
 		}
 	}
 
-	m.Subject(subject)
+	if req.ReplyTo != "" {
+		if err := m.ReplyTo(req.ReplyTo); err != nil {
+			return nil, fmt.Errorf("set reply-to: %w", err)
+		}
+	}
+	if req.InReplyTo != "" {
+		m.SetGenHeader(mail.HeaderInReplyTo, req.InReplyTo)
+	}
+	if len(req.References) > 0 {
+		m.SetGenHeader(mail.HeaderReferences, strings.Join(req.References, " "))
+	}
+	m.Subject(req.Subject)
 
-	if isHTML {
-		m.SetBodyString(mail.TypeTextHTML, body)
+	if req.IsHTML {
+		m.SetBodyString(mail.TypeTextHTML, req.Body)
 	} else {
-		m.SetBodyString(mail.TypeTextPlain, body)
+		m.SetBodyString(mail.TypeTextPlain, req.Body)
 	}
 
-	for _, att := range attachments {
-		m.AttachFile(att.Path, mail.WithFileName(att.Filename))
+	for _, att := range req.Attachments {
+		if len(att.Data) != 0 {
+			err = m.AttachReader(att.Filename, bytes.NewReader(att.Data))
+		} else {
+			m.AttachFile(att.Path, mail.WithFileName(att.Filename))
+		}
+		if err != nil {
+			return nil, fmt.Errorf("attach %s: %w", att.Filename, err)
+		}
 	}
 
 	var buf bytes.Buffer

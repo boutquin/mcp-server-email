@@ -1,8 +1,10 @@
 package tools_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -186,6 +188,71 @@ func TestReplyHandler_HappyPath(t *testing.T) {
 
 	if idx < 0 || quoteIdx < 0 || idx > quoteIdx {
 		t.Errorf("reply body should appear before quoted original")
+	}
+}
+
+func TestReplyHandler_AppendsTransmittedCopy(t *testing.T) {
+	t.Parallel()
+
+	wantRaw := []byte("From: me@example.com\r\nMessage-ID: <same@example.com>\r\n\r\nreply")
+	imapMock := &mockIMAPOps{getMessageResult: &models.Email{
+		ID: "acct1:INBOX:42", From: "alice@example.com", Subject: "Hello",
+	}}
+	smtpMock := &mockSMTPOps{
+		accountEmails: map[string]string{"acct1": "me@example.com"},
+		sentCopy:      wantRaw,
+	}
+
+	result, err := tools.ReplyHandler(imapMock, smtpMock)(t.Context(), toolReq(map[string]any{
+		"id": "acct1:INBOX:42", "body": "reply",
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("reply failed: err=%v result=%s", err, resultText(t, result))
+	}
+	if imapMock.lastAppendSentArgs.accountID != "acct1" ||
+		!bytes.Equal(imapMock.lastAppendSentArgs.msg, wantRaw) {
+		t.Fatalf("unexpected Sent copy: %+v", imapMock.lastAppendSentArgs)
+	}
+}
+
+func TestReplyHandler_AppendFailureDoesNotResend(t *testing.T) {
+	t.Parallel()
+
+	imapMock := &mockIMAPOps{
+		getMessageResult: &models.Email{ID: "acct1:INBOX:42", From: "alice@example.com"},
+		appendSentErr:    errors.New("append failed"),
+	}
+	smtpMock := &mockSMTPOps{accountEmails: map[string]string{"acct1": "me@example.com"}}
+	result, err := tools.ReplyHandler(imapMock, smtpMock)(t.Context(), toolReq(map[string]any{
+		"id": "acct1:INBOX:42", "body": "reply",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+	if !result.IsError || !strings.Contains(resultText(t, result), "do not resend") {
+		t.Fatalf("expected sent-but-not-archived error, got %s", resultText(t, result))
+	}
+	if smtpMock.sendCalls != 1 {
+		t.Fatalf("expected one SMTP send, got %d", smtpMock.sendCalls)
+	}
+}
+
+func TestReplyHandler_RejectsAccountMismatch(t *testing.T) {
+	t.Parallel()
+
+	imapMock := &mockIMAPOps{}
+	smtpMock := &mockSMTPOps{}
+	result, err := tools.ReplyHandler(imapMock, smtpMock)(t.Context(), toolReq(map[string]any{
+		"id": "acct1:INBOX:42", "body": "reply", "account": "acct2",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError || !strings.Contains(resultText(t, result), "does not match") {
+		t.Fatalf("expected account mismatch error, got %s", resultText(t, result))
+	}
+	if imapMock.lastGetMessageArgs.accountID != "" || smtpMock.sendCalled {
+		t.Fatal("mismatched account must fail before reading or sending")
 	}
 }
 

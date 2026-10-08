@@ -3,6 +3,7 @@ package tools_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -122,8 +123,8 @@ func TestSearchHandler_AllFilters(t *testing.T) {
 		t.Errorf("expected before '2024-12-31', got %q", args.before)
 	}
 
-	if args.limit != 25 {
-		t.Errorf("expected limit 25, got %d", args.limit)
+	if args.limit != 26 {
+		t.Errorf("expected requested page plus one lookahead result (26), got %d", args.limit)
 	}
 
 	if !args.includeBody {
@@ -249,5 +250,50 @@ func TestSearchHandler_LimitClamping(t *testing.T) {
 
 	if mock.lastSearchArgs.limit != 500 {
 		t.Errorf("expected limit clamped to 500, got %d", mock.lastSearchArgs.limit)
+	}
+}
+
+func TestSearchHandler_Pagination(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockIMAPOps{defaultAccountID: testDefaultAccount}
+	for i := range 5 {
+		mock.searchResult = append(mock.searchResult, models.Email{ID: fmt.Sprintf("default:INBOX:%d", i+1)})
+	}
+
+	result, err := tools.SearchHandler(mock)(t.Context(), toolReq(map[string]any{
+		"query": "test", "limit": float64(2), "offset": float64(2),
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.lastSearchArgs.limit != 5 {
+		t.Fatalf("expected backend lookahead limit 5, got %d", mock.lastSearchArgs.limit)
+	}
+
+	var parsed struct {
+		Messages []models.Email `json:"messages"`
+		Offset   int            `json:"offset"`
+		HasMore  bool           `json:"has_more"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, result)), &parsed); err != nil {
+		t.Fatalf("parse result: %v", err)
+	}
+	if len(parsed.Messages) != 2 || parsed.Messages[0].ID != "default:INBOX:3" || !parsed.HasMore || parsed.Offset != 2 {
+		t.Fatalf("unexpected page: %+v", parsed)
+	}
+}
+
+func TestSearchHandler_RejectsInvalidOffset(t *testing.T) {
+	t.Parallel()
+
+	result, err := tools.SearchHandler(&mockIMAPOps{defaultAccountID: testDefaultAccount})(
+		t.Context(), toolReq(map[string]any{"query": "test", "offset": float64(-1)}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError || !strings.Contains(resultText(t, result), "offset") {
+		t.Fatalf("expected offset validation error, got %s", resultText(t, result))
 	}
 }

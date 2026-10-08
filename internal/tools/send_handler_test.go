@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -76,6 +77,55 @@ func TestSendHandler_HappyPath(t *testing.T) {
 
 	if resp.From != "hello@example.com" {
 		t.Errorf("expected from 'hello@example.com', got %q", resp.From)
+	}
+}
+
+func TestSendHandler_AppendsSentCopy(t *testing.T) {
+	t.Parallel()
+	const sentCopy = "From: hello@example.com\r\nSubject: exact SMTP bytes\r\n\r\nwire payload"
+	imapMock := &mockIMAPOps{}
+	smtpMock := &mockSMTPOps{
+		defaultAccountID: testDefaultAccount,
+		accountEmails:    map[string]string{testDefaultAccount: "hello@example.com"},
+		sentCopy:         []byte(sentCopy),
+	}
+	handler := tools.SendHandler(smtpMock, testLimits, imapMock)
+	result, err := handler(context.Background(), toolReq(map[string]any{
+		"to": "recipient@example.com", "subject": "Archive me", "body": "message body",
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("expected successful send and archive, result=%v err=%v", result, err)
+	}
+	if !smtpMock.sendCalled || imapMock.lastAppendSentArgs.accountID != testDefaultAccount {
+		t.Fatalf("expected SMTP send followed by Sent append; SMTP=%v append=%+v", smtpMock.sendCalled, imapMock.lastAppendSentArgs)
+	}
+	if string(imapMock.lastAppendSentArgs.msg) != sentCopy {
+		t.Fatalf("APPEND must use exact SMTP serialization: got %q want %q", imapMock.lastAppendSentArgs.msg, sentCopy)
+	}
+	if smtpMock.sendCalls != 1 {
+		t.Fatalf("expected exactly one SMTP send, got %d", smtpMock.sendCalls)
+	}
+}
+
+func TestSendHandler_AppendFailureWarnsAgainstResend(t *testing.T) {
+	t.Parallel()
+	imapMock := &mockIMAPOps{appendSentErr: models.ErrFolderNotFound}
+	smtpMock := &mockSMTPOps{
+		defaultAccountID: testDefaultAccount,
+		accountEmails:    map[string]string{testDefaultAccount: "hello@example.com"},
+	}
+	handler := tools.SendHandler(smtpMock, testLimits, imapMock)
+	result, err := handler(context.Background(), toolReq(map[string]any{
+		"to": "recipient@example.com", "subject": "Do not duplicate", "body": "sent already",
+	}))
+	if err != nil || !result.IsError {
+		t.Fatalf("expected archive failure result, result=%v err=%v", result, err)
+	}
+	if !smtpMock.sendCalled || !strings.Contains(resultText(t, result), "do not resend") {
+		t.Fatalf("expected sent-without-archive warning and no retry: result=%q sent=%v", resultText(t, result), smtpMock.sendCalled)
+	}
+	if smtpMock.sendCalls != 1 {
+		t.Fatalf("archive failure must not retry SMTP, got %d sends", smtpMock.sendCalls)
 	}
 }
 
@@ -284,6 +334,33 @@ func TestDraftCreateHandler_HappyPath(t *testing.T) {
 	}
 }
 
+func TestDraftCreateHandler_UsesResolvedDraftMailbox(t *testing.T) {
+	t.Parallel()
+	imapMock := &mockIMAPOps{
+		defaultAccountID:      testDefaultAccount,
+		saveDraftUID:          9,
+		getFolderByRoleResult: "[Gmail]/Drafts",
+	}
+	smtpMock := &mockSMTPOps{
+		defaultAccountID: testDefaultAccount,
+		accountEmails:    map[string]string{testDefaultAccount: "hello@example.com"},
+	}
+	handler := tools.DraftCreateHandler(imapMock, smtpMock, testLimits)
+	result, err := handler(context.Background(), toolReq(map[string]any{"subject": "draft"}))
+	if err != nil || result.IsError {
+		t.Fatalf("expected draft creation success, result=%v err=%v", result, err)
+	}
+	var response struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, result)), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ID != testDefaultAccount+":[Gmail]/Drafts:9" {
+		t.Fatalf("draft ID should use resolved mailbox, got %q", response.ID)
+	}
+}
+
 func TestDraftCreateHandler_WithIsHTML(t *testing.T) {
 	t.Parallel()
 
@@ -372,6 +449,64 @@ func TestDraftSendHandler_HappyPath(t *testing.T) {
 	// Verify delete draft was called.
 	if imapMock.lastDeleteDraftArgs.accountID != testAccountHello || imapMock.lastDeleteDraftArgs.uid != 10 {
 		t.Errorf("unexpected delete draft args: %+v", imapMock.lastDeleteDraftArgs)
+	}
+}
+
+func TestDraftSendHandler_AppendsExactSMTPCopy(t *testing.T) {
+	t.Parallel()
+
+	originalDraft := []byte("From: old@example.com\r\nMessage-ID: <draft@example.com>\r\n\r\noriginal")
+	wantSentCopy := []byte("From: hello@example.com\r\nMessage-ID: <sent@example.com>\r\n\r\ntransmitted")
+	imapMock := &mockIMAPOps{
+		getMessageResult: &models.Email{
+			ID: "hello:Drafts:10", Subject: "Draft", To: []string{"recipient@example.com"}, Body: "body",
+		},
+		getDraftResult: originalDraft,
+	}
+	smtpMock := &mockSMTPOps{sentCopy: wantSentCopy}
+
+	result, err := tools.DraftSendHandler(imapMock, smtpMock)(t.Context(), toolReq(map[string]any{
+		"id": "hello:Drafts:10",
+	}))
+	if err != nil || result.IsError {
+		t.Fatalf("expected success, result=%v err=%v", result, err)
+	}
+	if string(imapMock.lastAppendSentArgs.msg) != string(wantSentCopy) {
+		t.Fatalf("APPEND must use exact SMTP copy: got %q want %q", imapMock.lastAppendSentArgs.msg, wantSentCopy)
+	}
+	if string(imapMock.lastAppendSentArgs.msg) == string(originalDraft) {
+		t.Fatal("APPEND incorrectly used the original draft MIME")
+	}
+	if smtpMock.sendCalls != 1 {
+		t.Fatalf("expected exactly one SMTP send, got %d", smtpMock.sendCalls)
+	}
+}
+
+func TestDraftSendHandler_AppendFailureKeepsDraft(t *testing.T) {
+	t.Parallel()
+
+	imapMock := &mockIMAPOps{
+		getMessageResult: &models.Email{
+			ID: "hello:Drafts:10", To: []string{"recipient@example.com"}, Body: "body",
+		},
+		appendSentErr: models.ErrFolderNotFound,
+	}
+	smtpMock := &mockSMTPOps{sentCopy: []byte("sent MIME")}
+
+	result, err := tools.DraftSendHandler(imapMock, smtpMock)(t.Context(), toolReq(map[string]any{
+		"id": "hello:Drafts:10",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected handler error: %v", err)
+	}
+	if !result.IsError || !strings.Contains(resultText(t, result), "do not resend") {
+		t.Fatalf("expected sent-but-not-archived warning, got %s", resultText(t, result))
+	}
+	if smtpMock.sendCalls != 1 {
+		t.Fatalf("APPEND failure must not retry SMTP, got %d sends", smtpMock.sendCalls)
+	}
+	if imapMock.deleteDraftCalls != 0 {
+		t.Fatalf("draft must remain when APPEND fails, got %d delete calls", imapMock.deleteDraftCalls)
 	}
 }
 
@@ -550,11 +685,9 @@ func TestDraftSendHandler_PlainTextDetection(t *testing.T) {
 // --- Send with attachments tests ---
 
 func TestSendHandler_WithAttachments(t *testing.T) {
-	t.Parallel()
-
 	// Create a real temp file for attachment.
 	dir := t.TempDir()
-	attachPath := dir + "/report.pdf"
+	attachPath := filepath.Join(dir, "report.pdf")
 
 	err := os.WriteFile(attachPath, []byte("fake pdf content"), 0o644)
 	if err != nil {
@@ -594,8 +727,12 @@ func TestSendHandler_WithAttachments(t *testing.T) {
 		t.Fatalf("expected 1 attachment, got %d", len(req.Attachments))
 	}
 
-	if req.Attachments[0].Path != attachPath {
-		t.Errorf("expected attachment path %q, got %q", attachPath, req.Attachments[0].Path)
+	resolvedPath, err := filepath.EvalSymlinks(attachPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Attachments[0].Path != resolvedPath {
+		t.Errorf("expected resolved attachment path %q, got %q", resolvedPath, req.Attachments[0].Path)
 	}
 
 	if req.Attachments[0].Filename != "report.pdf" {
@@ -604,10 +741,8 @@ func TestSendHandler_WithAttachments(t *testing.T) {
 }
 
 func TestSendHandler_AttachmentTooLarge(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
-	attachPath := dir + "/huge.bin"
+	attachPath := filepath.Join(dir, "huge.bin")
 
 	f, fErr := os.Create(attachPath) //nolint:gosec // test file in temp dir
 	if fErr != nil {
@@ -655,6 +790,7 @@ func TestSendHandler_AttachmentTooLarge(t *testing.T) {
 
 func TestSendHandler_AttachmentNotFound(t *testing.T) {
 	t.Parallel()
+	nonExistentPath := filepath.Join(t.TempDir(), "nonexistent-attachment-file.txt")
 
 	smtpMock := &mockSMTPOps{
 		defaultAccountID: testDefaultAccount,
@@ -668,7 +804,7 @@ func TestSendHandler_AttachmentNotFound(t *testing.T) {
 		"subject": "Subject",
 		"body":    "Body",
 		"attachments": []any{
-			map[string]any{"path": "/tmp/nonexistent-attachment-file.txt"},
+			map[string]any{"path": nonExistentPath},
 		},
 	}))
 	if err != nil {
@@ -688,11 +824,9 @@ func TestSendHandler_AttachmentNotFound(t *testing.T) {
 // --- DraftCreate with attachments tests ---
 
 func TestDraftCreateHandler_WithAttachments(t *testing.T) {
-	t.Parallel()
-
 	// Create a real temp file for attachment.
 	dir := t.TempDir()
-	attachPath := dir + "/notes.txt"
+	attachPath := filepath.Join(dir, "notes.txt")
 
 	err := os.WriteFile(attachPath, []byte("attachment content"), 0o644)
 	if err != nil {

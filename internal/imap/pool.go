@@ -42,6 +42,18 @@ type Pool struct {
 	wg            sync.WaitGroup // tracks in-flight pool operations for graceful shutdown
 }
 
+// beginOperation registers an operation atomically with respect to Close.
+// WaitGroup.Add must never race with Wait after the counter reaches zero.
+func (p *Pool) beginOperation() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closing.Load() {
+		return false
+	}
+	p.wg.Add(1)
+	return true
+}
+
 // NewPool creates a new IMAP connection pool.
 func NewPool(cfg *config.Config) *Pool {
 	accounts := make(map[string]*config.Account)
@@ -64,9 +76,10 @@ func NewPool(cfg *config.Config) *Pool {
 // requests for different accounts do not block each other.
 // Returns ErrPoolClosed if the pool is shutting down.
 func (p *Pool) Get(ctx context.Context, accountID string) (*Client, error) {
-	if p.closing.Load() {
+	if !p.beginOperation() {
 		return nil, ErrPoolClosed
 	}
+	defer p.wg.Done()
 
 	if accountID == "" {
 		accountID = p.cfg.DefaultAccount
@@ -117,6 +130,15 @@ func (p *Pool) Get(ctx context.Context, accountID string) (*Client, error) {
 	// Re-lock to store result and clean up inflight
 	p.mu.Lock()
 	delete(p.inflight, accountID)
+	if p.closing.Load() {
+		inf.err = ErrPoolClosed
+		close(inf.done)
+		p.mu.Unlock()
+		if client != nil {
+			_ = client.Close()
+		}
+		return nil, ErrPoolClosed
+	}
 
 	if err == nil {
 		p.clients[accountID] = client
@@ -167,7 +189,9 @@ func (p *Pool) GetFolderByRole(
 	accountID string,
 	role models.FolderRole,
 ) (string, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return "", ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -185,7 +209,9 @@ func (p *Pool) GetFolderByRole(
 
 // ListFolders returns all mailboxes for the given account.
 func (p *Pool) ListFolders(ctx context.Context, accountID string) ([]models.Folder, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return nil, ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -208,7 +234,9 @@ func (p *Pool) ListMessages(
 	limit, offset int,
 	includeBody bool,
 ) ([]models.Email, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return nil, ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -231,7 +259,9 @@ func (p *Pool) ListUnread(
 	limit int,
 	includeBody bool,
 ) ([]models.Email, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return nil, ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -254,7 +284,9 @@ func (p *Pool) Search(
 	limit int,
 	includeBody bool,
 ) ([]models.Email, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return nil, ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -275,7 +307,9 @@ func (p *Pool) SearchByMessageID(
 	ctx context.Context,
 	accountID, folder, messageID string,
 ) ([]models.Email, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return nil, ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -297,7 +331,9 @@ func (p *Pool) GetMessage(
 	accountID, folder string,
 	uid uint32,
 ) (*models.Email, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return nil, ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -319,7 +355,9 @@ func (p *Pool) GetAttachments(
 	accountID, folder string,
 	uid uint32,
 ) ([]models.AttachmentInfo, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return nil, ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -342,7 +380,9 @@ func (p *Pool) GetAttachment(
 	uid uint32,
 	index int,
 ) ([]byte, string, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return nil, "", ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -365,7 +405,9 @@ func (p *Pool) MoveMessage(
 	uid uint32,
 	dest string,
 ) error {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -388,7 +430,9 @@ func (p *Pool) CopyMessage(
 	uid uint32,
 	dest string,
 ) error {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -411,7 +455,9 @@ func (p *Pool) DeleteMessage(
 	uid uint32,
 	permanent bool,
 ) error {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -434,7 +480,9 @@ func (p *Pool) MarkRead(
 	uid uint32,
 	read bool,
 ) error {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -457,7 +505,9 @@ func (p *Pool) SetFlag(
 	uid uint32,
 	flagged bool,
 ) error {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -475,7 +525,9 @@ func (p *Pool) SetFlag(
 
 // CreateFolder creates a new mailbox for the given account.
 func (p *Pool) CreateFolder(ctx context.Context, accountID, name string) error {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -491,9 +543,41 @@ func (p *Pool) CreateFolder(ctx context.Context, accountID, name string) error {
 	return nil
 }
 
+func (p *Pool) RenameFolder(ctx context.Context, accountID, oldName, newName string) error {
+	if !p.beginOperation() {
+		return ErrPoolClosed
+	}
+	defer p.wg.Done()
+	client, err := p.Get(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if err := client.RenameFolder(ctx, oldName, newName); err != nil {
+		return wrapIMAPError("rename folder", err)
+	}
+	return nil
+}
+
+func (p *Pool) DeleteFolder(ctx context.Context, accountID, name string) error {
+	if !p.beginOperation() {
+		return ErrPoolClosed
+	}
+	defer p.wg.Done()
+	client, err := p.Get(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if err := client.DeleteFolder(ctx, name); err != nil {
+		return wrapIMAPError("delete folder", err)
+	}
+	return nil
+}
+
 // SaveDraft saves a message as a draft for the given account.
 func (p *Pool) SaveDraft(ctx context.Context, accountID string, msg []byte) (uint32, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return 0, ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -509,9 +593,45 @@ func (p *Pool) SaveDraft(ctx context.Context, accountID string, msg []byte) (uin
 	return uid, nil
 }
 
+func (p *Pool) UpdateDraft(ctx context.Context, accountID string, uid uint32, msg []byte) (uint32, error) {
+	if !p.beginOperation() {
+		return 0, ErrPoolClosed
+	}
+	defer p.wg.Done()
+	client, err := p.Get(ctx, accountID)
+	if err != nil {
+		return 0, err
+	}
+	newUID, err := client.UpdateDraft(ctx, uid, msg)
+	if err != nil {
+		return newUID, wrapIMAPError("update draft", err)
+	}
+	return newUID, nil
+}
+
+// AppendSent stores a copy of a sent RFC 5322 message in the account's Sent folder.
+func (p *Pool) AppendSent(ctx context.Context, accountID string, msg []byte) error {
+	if !p.beginOperation() {
+		return ErrPoolClosed
+	}
+	defer p.wg.Done()
+
+	client, err := p.Get(ctx, accountID)
+	if err != nil {
+		return err
+	}
+
+	if err := client.AppendSent(ctx, msg); err != nil {
+		return wrapIMAPError("append sent message", err)
+	}
+	return nil
+}
+
 // GetDraft retrieves a draft message for the given account.
 func (p *Pool) GetDraft(ctx context.Context, accountID string, uid uint32) ([]byte, error) {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return nil, ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -529,7 +649,9 @@ func (p *Pool) GetDraft(ctx context.Context, accountID string, uid uint32) ([]by
 
 // DeleteDraft deletes a draft for the given account.
 func (p *Pool) DeleteDraft(ctx context.Context, accountID string, uid uint32) error {
-	p.wg.Add(1)
+	if !p.beginOperation() {
+		return ErrPoolClosed
+	}
 	defer p.wg.Done()
 
 	client, err := p.Get(ctx, accountID)
@@ -550,7 +672,9 @@ func (p *Pool) DeleteDraft(ctx context.Context, accountID string, uid uint32) er
 // all connections. On timeout, connections are force-closed to unblock hung
 // operations.
 func (p *Pool) Close(ctx context.Context) {
+	p.mu.Lock()
 	p.closing.Store(true)
+	p.mu.Unlock()
 
 	// Wait for in-flight operations to complete or context deadline.
 	done := make(chan struct{})

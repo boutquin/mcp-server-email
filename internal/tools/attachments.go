@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/boutquin/mcp-server-email/internal/smtp"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -66,12 +67,16 @@ func parseAttachments(
 
 	result := make([]smtp.SendAttachment, len(inputs))
 	for i := range inputs {
+		resolvedPath, err := filepath.EvalSymlinks(inputs[i].Path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve attachment path: %w", err)
+		}
 		if inputs[i].Filename == "" {
 			inputs[i].Filename = filepath.Base(inputs[i].Path)
 		}
 
 		result[i] = smtp.SendAttachment{
-			Path:     inputs[i].Path,
+			Path:     resolvedPath,
 			Filename: inputs[i].Filename,
 		}
 	}
@@ -79,10 +84,8 @@ func parseAttachments(
 	return result, nil
 }
 
-// validateAttachments validates a slice of attachment inputs.
-// It checks that each path is absolute, exists, is a regular file, and is within
-// the size limits. maxFileSizeBytes is the per-file limit and maxTotalSizeBytes
-// is the cumulative limit for all attachments.
+// validateAttachments validates that each attachment is an absolute regular
+// file within the configured size limits.
 func validateAttachments(
 	attachments []AttachmentInput, maxFileSizeBytes, maxTotalSizeBytes int64,
 ) error {
@@ -97,12 +100,16 @@ func validateAttachments(
 			return fmt.Errorf("attachment %d: %w, got %q", i, errAttachmentPathAbsolute, att.Path)
 		}
 
-		info, err := os.Stat(att.Path)
+		realPath, err := filepath.EvalSymlinks(att.Path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return fmt.Errorf("attachment %d: %w: %s", i, errAttachmentNotFound, att.Path)
 			}
 
+			return fmt.Errorf("attachment %d: %w", i, err)
+		}
+		info, err := os.Stat(realPath)
+		if err != nil {
 			return fmt.Errorf("attachment %d: %w", i, err)
 		}
 
@@ -127,5 +134,36 @@ func validateAttachments(
 		)
 	}
 
+	return nil
+}
+
+// rejectSymlinkPath rejects symlinks in every existing component. If
+// allowMissingLeaf is true, only the final path component may not exist.
+// Attachment downloads use this helper to keep output paths predictable.
+func rejectSymlinkPath(path string, allowMissingLeaf bool) error {
+	if !filepath.IsAbs(path) {
+		return errAttachmentPathAbsolute
+	}
+	clean := filepath.Clean(path)
+	volume := filepath.VolumeName(clean)
+	rest := strings.TrimLeft(strings.TrimPrefix(clean, volume), string(filepath.Separator))
+	current := volume + string(filepath.Separator)
+	parts := strings.Split(rest, string(filepath.Separator))
+	for i, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if allowMissingLeaf && i == len(parts)-1 && os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("path component unavailable: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("path must not contain symlinks: %s", current)
+		}
+	}
 	return nil
 }

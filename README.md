@@ -235,6 +235,8 @@ Supported OAuth2 providers: **Gmail** (`gmail.com`, `googlemail.com`) and **Outl
 
 *One of `EMAIL_CONFIG_FILE` or `EMAIL_ACCOUNTS` is required.
 
+Account IDs must be non-empty and unique. `EMAIL_DEFAULT_ACCOUNT`, when set, must match one configured account. Each account requires `id`, `email`, `username`, valid IMAP/SMTP hosts and ports, and a `password` when using password authentication. Provider auto-detection may supply the hosts and ports before validation; OAuth2 accounts require `oauth_client_id` instead of a password.
+
 ### Config file permissions
 
 The config file contains account passwords. Always restrict access:
@@ -243,7 +245,7 @@ The config file contains account passwords. Always restrict access:
 chmod 600 ~/.config/mcp-email/accounts.json
 ```
 
-## Tools (22)
+## Tools (27)
 
 ### Account & folder tools
 
@@ -252,6 +254,10 @@ chmod 600 ~/.config/mcp-email/accounts.json
 | `email_accounts` | List configured accounts with connection status | — |
 | `email_folders` | List all folders with unread/total counts | `account?` |
 | `email_folder_create` | Create new folder | `name`, `account?` |
+| `email_folder_rename` | Rename a folder | `name`, `newName`, `account?` |
+| `email_folder_delete` | Delete a folder | `name`, `account?` |
+
+`email_folder_delete` refuses to delete `INBOX` or the Drafts, Sent, and Trash special-use folders, including provider-specific aliases discovered through IMAP roles.
 
 ### Message listing
 
@@ -290,9 +296,14 @@ chmod 600 ~/.config/mcp-email/accounts.json
 |------|-------------|------------|
 | `email_send` | Send via SMTP with optional attachments | `to`, `subject`, `body`, `cc?`, `bcc?`, `replyTo?`, `isHtml?`, `attachments?`, `account?` |
 | `email_draft_create` | Save draft with optional attachments | `to?`, `subject?`, `body?`, `cc?`, `bcc?`, `isHtml?`, `attachments?`, `account?` |
+| `email_draft_list` | List drafts from the account's Drafts folder | `limit?`, `offset?`, `includeBody?`, `account?` |
+| `email_draft_update` | Replace a draft using a complete RFC 5322/MIME message; returns a new ID | `id`, `message` |
+| `email_draft_delete` | Delete a draft | `id` |
 | `email_draft_send` | Send existing draft | `id` |
 
 All optional `account` params default to the configured default account.
+
+`email_draft_update` replaces the stored message with the exact RFC 5322/MIME value supplied in `message`. MIME structure and attachments are preserved only when that complete original structure is included. The operation appends a new draft, returns its new message ID, and marks the previous UID as deleted without issuing a mailbox-wide expunge.
 
 ## Search
 
@@ -332,7 +343,7 @@ The existing operation timeout (default 30s) prevents hung body searches on larg
 
 **Download limit:** Attachment downloads (`email_attachment_get`) are capped at 25 MB by default, configurable via `MAX_DOWNLOAD_SIZE_MB`.
 
-Validation failures (missing file, non-absolute path, size exceeded) return `INVALID_ARGUMENT`.
+Validation failures (missing file, non-absolute path, size exceeded) are returned as MCP tool errors with a human-readable message.
 
 ## Message IDs
 
@@ -346,20 +357,9 @@ Example: `hello:INBOX:12345`
 
 All CRUD tools (`email_get`, `email_move`, `email_copy`, `email_delete`, `email_mark_read`, `email_flag`, `email_draft_send`) extract the account and folder from the ID — no separate params needed.
 
-## Error Codes
+## Tool errors
 
-All errors are returned as MCP tool errors with a structured code prefix:
-
-| Code | Meaning |
-|------|---------|
-| `AUTH_FAILED` | IMAP/SMTP authentication failed |
-| `CONNECTION_FAILED` | Cannot connect to server |
-| `ACCOUNT_NOT_FOUND` | Unknown account ID |
-| `FOLDER_NOT_FOUND` | Mailbox doesn't exist |
-| `MESSAGE_NOT_FOUND` | UID not found in mailbox |
-| `INVALID_ARGUMENT` | Missing/invalid parameter (including attachment validation) |
-| `TIMEOUT` | Operation timed out |
-| `INTERNAL` | Unexpected server error |
+Failures are returned as MCP tool errors (`isError: true`) with a human-readable text message. Error strings include useful context such as the account, folder, message ID, or invalid parameter when available. They are not a stable machine-readable error-code API; clients should use the MCP error flag and present the message rather than parsing its text.
 
 ## Resources
 

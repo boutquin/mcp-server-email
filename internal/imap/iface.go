@@ -40,7 +40,10 @@ type Operations interface {
 	MarkRead(ctx context.Context, accountID, folder string, uid uint32, read bool) error
 	SetFlag(ctx context.Context, accountID, folder string, uid uint32, flagged bool) error
 	CreateFolder(ctx context.Context, accountID, name string) error
+	RenameFolder(ctx context.Context, accountID, oldName, newName string) error
+	DeleteFolder(ctx context.Context, accountID, name string) error
 	SaveDraft(ctx context.Context, accountID string, msg []byte) (uint32, error)
+	UpdateDraft(ctx context.Context, accountID string, uid uint32, msg []byte) (uint32, error)
 	GetDraft(ctx context.Context, accountID string, uid uint32) ([]byte, error)
 	DeleteDraft(ctx context.Context, accountID string, uid uint32) error
 	AccountStatus() []models.AccountStatus

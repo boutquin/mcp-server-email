@@ -71,7 +71,10 @@ func (c *Client) DeleteMessage(
 		uidSet.AddNum(imap.UID(uid))
 
 		if permanent {
-			// Mark as deleted and expunge
+			if !c.conn.SupportsUIDExpunge() {
+				return fmt.Errorf("permanent delete requires IMAP UIDPLUS or IMAP4rev2; server cannot safely expunge only UID %d", uid)
+			}
+
 			err = c.conn.Store(uidSet, &imap.StoreFlags{
 				Op:    imap.StoreFlagsAdd,
 				Flags: []imap.Flag{imap.FlagDeleted},
@@ -80,9 +83,9 @@ func (c *Client) DeleteMessage(
 				return fmt.Errorf("mark deleted: %w", err)
 			}
 
-			err = c.conn.Expunge()
+			err = c.conn.UIDExpunge(uidSet)
 			if err != nil {
-				return fmt.Errorf("expunge: %w", err)
+				return fmt.Errorf("uid expunge: %w", err)
 			}
 		} else {
 			// Move to trash folder (resolved via RFC 6154 / fallback)

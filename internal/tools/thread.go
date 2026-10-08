@@ -48,7 +48,7 @@ func ThreadHandler(ops imap.Operations) server.ToolHandlerFunc {
 		folders := threadFolders(ctx, ops, account, mailbox)
 
 		// Search for all related messages across folders.
-		thread := searchThread(ctx, ops, account, folders, searchIDs)
+		thread, searchErrors := searchThread(ctx, ops, account, folders, searchIDs)
 
 		// Include the original message.
 		thread = ensureTargetIncluded(thread, target)
@@ -59,8 +59,10 @@ func ThreadHandler(ops imap.Operations) server.ToolHandlerFunc {
 		})
 
 		return jsonResult(map[string]any{
-			"thread": thread,
-			"count":  len(thread),
+			"thread":  thread,
+			"count":   len(thread),
+			"partial": len(searchErrors) > 0,
+			"errors":  searchErrors,
 		}), nil
 	}
 }
@@ -174,15 +176,17 @@ func searchThread(
 	account string,
 	folders []string,
 	messageIDs []string,
-) []models.Email {
+) ([]models.Email, []string) {
 	seenMsgID := make(map[string]struct{})
 
 	var result []models.Email
+	var searchErrors []string
 
 	for _, folder := range folders {
 		for _, msgID := range messageIDs {
 			msgs, err := ops.SearchByMessageID(ctx, account, folder, msgID)
 			if err != nil {
+				searchErrors = append(searchErrors, folder+": "+err.Error())
 				continue
 			}
 
@@ -203,7 +207,7 @@ func searchThread(
 		}
 	}
 
-	return result
+	return result, searchErrors
 }
 
 // ensureTargetIncluded adds the target message to the thread if not already present.

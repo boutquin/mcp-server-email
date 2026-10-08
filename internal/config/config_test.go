@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +33,64 @@ func TestAccountIMAPUseTLS(t *testing.T) {
 				t.Errorf("IMAPUseTLS() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadFromEnv_RejectsDuplicateAccountIDs(t *testing.T) {
+	t.Setenv("EMAIL_ACCOUNTS", `[
+		{"id":"same","email":"one@example.com","imap_host":"imap.example.com","imap_port":993,"smtp_host":"smtp.example.com","smtp_port":465,"username":"one","password":"pass"},
+		{"id":"same","email":"two@example.com","imap_host":"imap.example.com","imap_port":993,"smtp_host":"smtp.example.com","smtp_port":465,"username":"two","password":"pass"}
+	]`)
+
+	_, err := LoadFromEnv()
+	if !errors.Is(err, ErrDuplicateAccountID) {
+		t.Fatalf("LoadFromEnv() error = %v, want ErrDuplicateAccountID", err)
+	}
+}
+
+func TestLoadFromEnv_RejectsUnknownDefaultAccount(t *testing.T) {
+	t.Setenv("EMAIL_ACCOUNTS", `[{"id":"known","email":"user@example.com","imap_host":"imap.example.com","imap_port":993,"smtp_host":"smtp.example.com","smtp_port":465,"username":"user","password":"pass"}]`)
+	t.Setenv("EMAIL_DEFAULT_ACCOUNT", "missing")
+
+	_, err := LoadFromEnv()
+	if !errors.Is(err, ErrDefaultAccount) {
+		t.Fatalf("LoadFromEnv() error = %v, want ErrDefaultAccount", err)
+	}
+}
+
+func TestLoadFromEnv_RequiredAccountFields(t *testing.T) {
+	base := `{"id":"test","email":"user@example.com","imap_host":"imap.example.com","imap_port":993,"smtp_host":"smtp.example.com","smtp_port":465,"username":"user","password":"pass"}`
+	tests := []struct {
+		name  string
+		json  string
+		field string
+	}{
+		{"id", strings.Replace(base, `"id":"test"`, `"id":""`, 1), "id"},
+		{"email", strings.Replace(base, `"email":"user@example.com"`, `"email":""`, 1), "email"},
+		{"imap host", strings.Replace(base, `"imap_host":"imap.example.com"`, `"imap_host":""`, 1), "imap_host"},
+		{"imap port", strings.Replace(base, `"imap_port":993`, `"imap_port":0`, 1), "imap_port"},
+		{"smtp host", strings.Replace(base, `"smtp_host":"smtp.example.com"`, `"smtp_host":""`, 1), "smtp_host"},
+		{"smtp port", strings.Replace(base, `"smtp_port":465`, `"smtp_port":0`, 1), "smtp_port"},
+		{"username", strings.Replace(base, `"username":"user"`, `"username":""`, 1), "username"},
+		{"password", strings.Replace(base, `"password":"pass"`, `"password":""`, 1), "password"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("EMAIL_ACCOUNTS", "["+tt.json+"]")
+			_, err := LoadFromEnv()
+			if err == nil || !strings.Contains(err.Error(), tt.field) {
+				t.Fatalf("LoadFromEnv() error = %v, want field %q", err, tt.field)
+			}
+		})
+	}
+}
+
+func TestLoadFromEnv_OAuthDoesNotRequirePassword(t *testing.T) {
+	t.Setenv("EMAIL_ACCOUNTS", `[{"id":"oauth","email":"user@gmail.com","username":"user@gmail.com","auth_method":"oauth2","oauth_client_id":"client"}]`)
+
+	if _, err := LoadFromEnv(); err != nil {
+		t.Fatalf("LoadFromEnv() error = %v", err)
 	}
 }
 
@@ -413,6 +473,7 @@ func TestLoadFromEnv_OAuthFields(t *testing.T) {
 		t.Setenv("EMAIL_ACCOUNTS", `[{
 			"id":"oauth-test",
 			"email":"user@gmail.com",
+			"username":"user@gmail.com",
 			"imap_host":"imap.gmail.com","imap_port":993,
 			"smtp_host":"smtp.gmail.com","smtp_port":587,
 			"auth_method":"oauth2",
@@ -442,6 +503,7 @@ func TestLoadFromEnv_OAuthFields(t *testing.T) {
 
 	t.Run("default password auth", func(t *testing.T) {
 		t.Setenv("EMAIL_ACCOUNTS", `[{"id":"test","email":"test@example.com",`+
+			`"username":"user@example.com",`+
 			`"imap_host":"imap.example.com","imap_port":993,`+
 			`"smtp_host":"smtp.example.com","smtp_port":465,`+
 			`"username":"user","password":"pass"}]`)
@@ -482,7 +544,7 @@ func TestLoadFromEnv_OAuthFields(t *testing.T) {
 
 	t.Run("oauth token file override", func(t *testing.T) {
 		t.Setenv("EMAIL_ACCOUNTS", `[{
-			"id":"test","email":"user@gmail.com",
+			"id":"test","email":"user@gmail.com","username":"user@gmail.com",
 			"imap_host":"imap.gmail.com","imap_port":993,
 			"smtp_host":"smtp.gmail.com","smtp_port":587,
 			"auth_method":"oauth2",

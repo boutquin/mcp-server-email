@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"regexp"
 	"strings"
 	"sync"
@@ -34,6 +35,11 @@ type Client struct {
 	tokenSource oauth2.TokenSource                        // nil for password auth
 	newDialer   func(opts ...mail.Option) (dialer, error) // factory for testability
 }
+
+// ErrDeliveryUnknown means the SMTP transaction failed in a state where the
+// server may already have accepted the message. Retrying automatically could
+// therefore deliver a duplicate.
+var ErrDeliveryUnknown = errors.New("SMTP delivery result unknown")
 
 // nopLogger is a discarding logger used when no logger is configured.
 //
@@ -139,12 +145,19 @@ func (p *Pool) Get(accountID string) (*Client, error) {
 
 // Send sends an email for the given account.
 func (p *Pool) Send(ctx context.Context, accountID string, req *SendRequest) error {
+	_, err := p.SendWithCopy(ctx, accountID, req)
+	return err
+}
+
+// SendWithCopy sends an email and returns the RFC 5322 bytes serialized from
+// the same message object passed to SMTP.
+func (p *Pool) SendWithCopy(ctx context.Context, accountID string, req *SendRequest) ([]byte, error) {
 	client, err := p.Get(accountID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return client.Send(ctx, req)
+	return client.SendWithCopy(ctx, req)
 }
 
 // AccountEmail returns the email address for the given account.
@@ -193,7 +206,15 @@ type SendRequest struct {
 
 // Send sends an email.
 func (c *Client) Send(ctx context.Context, req *SendRequest) error {
+	_, err := c.SendWithCopy(ctx, req)
+	return err
+}
+
+// SendWithCopy sends an email and returns the exact serialization produced
+// from the successfully transmitted message object.
+func (c *Client) SendWithCopy(ctx context.Context, req *SendRequest) ([]byte, error) {
 	start := time.Now()
+	var sentCopy []byte
 
 	c.log().Info("sending",
 		slog.Int("recipients", len(req.To)),
@@ -201,14 +222,29 @@ func (c *Client) Send(ctx context.Context, req *SendRequest) error {
 	)
 
 	err := retry.WithRetry(ctx, c.retryCfg, c.limiter, smtpIsRetryable, func() error {
-		return c.withTimeout(ctx, func() error {
-			m, buildErr := c.buildMessage(req)
-			if buildErr != nil {
-				return buildErr
-			}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 
-			return c.dialAndSend(m)
-		})
+		m, buildErr := c.buildMessage(req)
+		if buildErr != nil {
+			return buildErr
+		}
+
+		var serialized bytes.Buffer
+		if _, serializeErr := m.WriteTo(&serialized); serializeErr != nil {
+			return fmt.Errorf("serialize message: %w", serializeErr)
+		}
+
+		sendErr := c.dialAndSend(m)
+		if isAmbiguousDeliveryError(sendErr) {
+			return &retry.PermanentError{Err: fmt.Errorf("%w: %v", ErrDeliveryUnknown, sendErr)}
+		}
+		if sendErr == nil {
+			sentCopy = append(sentCopy[:0], serialized.Bytes()...)
+		}
+
+		return sendErr
 	})
 	if err != nil {
 		c.log().Error("send failed",
@@ -216,7 +252,7 @@ func (c *Client) Send(ctx context.Context, req *SendRequest) error {
 			slog.String("error", err.Error()),
 		)
 
-		return fmt.Errorf("send: %w", err)
+		return nil, fmt.Errorf("send: %w", err)
 	}
 
 	c.log().Info("sent",
@@ -224,7 +260,7 @@ func (c *Client) Send(ctx context.Context, req *SendRequest) error {
 		slog.Int("recipients", len(req.To)),
 	)
 
-	return nil
+	return sentCopy, nil
 }
 
 // RateLimitInfo returns current rate limit state.
@@ -293,7 +329,7 @@ func (c *Client) dialAndSend(m *mail.Msg) error {
 		opts = append(opts, mail.WithSMTPAuthCustom(smtpAuth))
 	} else {
 		opts = append(opts,
-			mail.WithSMTPAuth(mail.SMTPAuthPlain),
+			mail.WithSMTPAuth(mail.SMTPAuthAutoDiscover),
 			mail.WithUsername(c.account.Username),
 			mail.WithPassword(c.account.Password),
 		)
@@ -447,28 +483,25 @@ func attachFiles(m *mail.Msg, attachments []SendAttachment) error {
 	return nil
 }
 
-// withTimeout runs an operation with the client's configured timeout.
-// If the operation doesn't complete within the timeout, it returns context.DeadlineExceeded.
-func (c *Client) withTimeout(ctx context.Context, op func() error) error {
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-
-	done := make(chan error, 1)
-
-	go func() {
-		done <- op()
-	}()
-
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return fmt.Errorf("SMTP operation timed out after %v: %w", c.timeout, ctx.Err())
+func isAmbiguousDeliveryError(err error) bool {
+	if err == nil {
+		return false
 	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // smtpIsRetryable extends retry.IsRetryable with SMTP-specific 4xx pattern matching.
 func smtpIsRetryable(err error) bool {
+	if errors.Is(err, ErrDeliveryUnknown) || isAmbiguousDeliveryError(err) {
+		return false
+	}
 	if retry.IsRetryable(err) {
 		return true
 	}

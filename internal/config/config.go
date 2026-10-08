@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/boutquin/mcp-server-email/internal/models"
 )
@@ -17,6 +18,10 @@ var (
 	ErrNoAccounts         = errors.New("no accounts configured")
 	ErrOAuthMissingClient = errors.New("oauth2 requires oauth_client_id")
 	ErrUnknownAuthMethod  = errors.New("unknown auth_method")
+	ErrDuplicateAccountID = errors.New("duplicate account id")
+	ErrDefaultAccount     = errors.New("default account is not configured")
+	ErrRequiredField      = errors.New("required account field is missing")
+	ErrInvalidPort        = errors.New("account port must be between 1 and 65535")
 )
 
 const (
@@ -134,12 +139,8 @@ func LoadFromEnv() (*Config, error) {
 		applyProviderDefaults(&cfg.Accounts[i])
 	}
 
-	// Validate auth method configuration.
-	for _, acct := range cfg.Accounts {
-		err := validateAuthMethod(&acct)
-		if err != nil {
-			return nil, err
-		}
+	if err := validateAccounts(cfg.Accounts); err != nil {
+		return nil, err
 	}
 
 	// Default account
@@ -147,10 +148,69 @@ func LoadFromEnv() (*Config, error) {
 	if cfg.DefaultAccount == "" {
 		cfg.DefaultAccount = cfg.Accounts[0].ID
 	}
+	if !hasAccount(cfg.Accounts, cfg.DefaultAccount) {
+		return nil, fmt.Errorf("%w: %q", ErrDefaultAccount, cfg.DefaultAccount)
+	}
 
 	applyEnvOverrides(cfg)
 
 	return cfg, nil
+}
+
+func validateAccounts(accounts []Account) error {
+	seen := make(map[string]struct{}, len(accounts))
+	for i := range accounts {
+		acct := &accounts[i]
+		if err := validateRequiredFields(acct); err != nil {
+			return fmt.Errorf("account %d: %w", i, err)
+		}
+		if _, exists := seen[acct.ID]; exists {
+			return fmt.Errorf("%w: %q", ErrDuplicateAccountID, acct.ID)
+		}
+		seen[acct.ID] = struct{}{}
+
+		if err := validateAuthMethod(acct); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRequiredFields(acct *Account) error {
+	required := []struct {
+		name  string
+		value string
+	}{
+		{"id", acct.ID},
+		{"email", acct.Email},
+		{"imap_host", acct.IMAPHost},
+		{"smtp_host", acct.SMTPHost},
+		{"username", acct.Username},
+	}
+	for _, field := range required {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("%w: %s", ErrRequiredField, field.name)
+		}
+	}
+	if acct.IMAPPort < 1 || acct.IMAPPort > 65535 {
+		return fmt.Errorf("%w: imap_port=%d", ErrInvalidPort, acct.IMAPPort)
+	}
+	if acct.SMTPPort < 1 || acct.SMTPPort > 65535 {
+		return fmt.Errorf("%w: smtp_port=%d", ErrInvalidPort, acct.SMTPPort)
+	}
+	if (acct.AuthMethod == "" || acct.AuthMethod == "password") && strings.TrimSpace(acct.Password) == "" {
+		return fmt.Errorf("%w: password", ErrRequiredField)
+	}
+	return nil
+}
+
+func hasAccount(accounts []Account, id string) bool {
+	for i := range accounts {
+		if accounts[i].ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // GetAccount returns an account by ID, or the default account if id is empty.

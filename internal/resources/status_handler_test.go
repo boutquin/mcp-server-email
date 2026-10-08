@@ -76,7 +76,19 @@ func (m *mockIMAPOps) CreateFolder(_ context.Context, _, _ string) error {
 	return nil
 }
 
+func (m *mockIMAPOps) RenameFolder(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (m *mockIMAPOps) DeleteFolder(_ context.Context, _, _ string) error {
+	return nil
+}
+
 func (m *mockIMAPOps) SaveDraft(_ context.Context, _ string, _ []byte) (uint32, error) {
+	return 0, errNotImplemented
+}
+
+func (m *mockIMAPOps) UpdateDraft(_ context.Context, _ string, _ uint32, _ []byte) (uint32, error) {
 	return 0, errNotImplemented
 }
 

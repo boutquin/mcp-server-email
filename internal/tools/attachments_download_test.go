@@ -159,8 +159,6 @@ func TestAttachmentGetHandler_ReturnsContent(t *testing.T) {
 }
 
 func TestAttachmentGetHandler_SaveToFile(t *testing.T) {
-	t.Parallel()
-
 	content := []byte("saved attachment content")
 	dir := t.TempDir()
 	savePath := filepath.Join(dir, "downloaded.pdf")
@@ -184,8 +182,14 @@ func TestAttachmentGetHandler_SaveToFile(t *testing.T) {
 
 	text := resultText(t, result)
 
-	if !strings.Contains(text, savePath) {
-		t.Error("expected save path in result")
+	var saved struct {
+		Saved string `json:"saved"`
+	}
+	if err := json.Unmarshal([]byte(text), &saved); err != nil {
+		t.Fatalf("failed to parse save result: %v", err)
+	}
+	if saved.Saved != savePath {
+		t.Errorf("saved path = %q, want %q", saved.Saved, savePath)
 	}
 
 	// Verify file was written.
@@ -196,6 +200,90 @@ func TestAttachmentGetHandler_SaveToFile(t *testing.T) {
 
 	if string(data) != string(content) {
 		t.Errorf("saved content mismatch: got %q, want %q", data, content)
+	}
+}
+
+func TestAttachmentGetHandler_DoesNotOverwriteExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	savePath := filepath.Join(dir, "existing.txt")
+	if err := os.WriteFile(savePath, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := &mockIMAPOps{defaultAccountID: "test", getAttachmentData: []byte("new"), getAttachmentFilename: "file.txt"}
+	result, err := tools.AttachmentGetHandler(mock, testLimits)(t.Context(), toolReq(map[string]any{
+		"id": "test:INBOX:42", "index": float64(0), "saveTo": savePath,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatal("expected existing target to be rejected")
+	}
+	got, err := os.ReadFile(savePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("existing file changed: %q", got)
+	}
+}
+
+func TestValidateSavePath_RejectsSymlinkParent(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	mock := &mockIMAPOps{defaultAccountID: "test", getAttachmentData: []byte("data"), getAttachmentFilename: "file.txt"}
+	result, err := tools.AttachmentGetHandler(mock, testLimits)(t.Context(), toolReq(map[string]any{
+		"id": "test:INBOX:42", "index": float64(0), "saveTo": filepath.Join(link, "out.txt"),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatal("expected symlink parent to be rejected")
+	}
+}
+
+func TestAttachmentGetHandler_AllowsSaveToOutsideWorkingDirectory(t *testing.T) {
+	outside := t.TempDir()
+	savePath := filepath.Join(outside, "not-allowed.txt")
+	mock := &mockIMAPOps{defaultAccountID: "test", getAttachmentData: []byte("data"), getAttachmentFilename: "file.txt"}
+	result, err := tools.AttachmentGetHandler(mock, testLimits)(t.Context(), toolReq(map[string]any{
+		"id": "test:INBOX:42", "index": float64(0), "saveTo": savePath,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected save outside working directory to succeed: %s", resultText(t, result))
+	}
+	if _, err := os.Stat(savePath); err != nil {
+		t.Fatalf("expected target file to be saved: %v", err)
+	}
+}
+
+func TestAttachmentGetHandler_RejectsPortableTraversalSeparators(t *testing.T) {
+	dir := t.TempDir()
+	mock := &mockIMAPOps{defaultAccountID: "test", getAttachmentData: []byte("data"), getAttachmentFilename: "file.txt"}
+	for _, savePath := range []string{
+		dir + "/child/../escape.txt",
+		dir + `\\child\\..\\escape.txt`,
+	} {
+		result, err := tools.AttachmentGetHandler(mock, testLimits)(t.Context(), toolReq(map[string]any{
+			"id": "test:INBOX:42", "index": float64(0), "saveTo": savePath,
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.IsError || !strings.Contains(resultText(t, result), "traversal") {
+			t.Fatalf("expected traversal rejection for %q", savePath)
+		}
 	}
 }
 
@@ -257,6 +345,8 @@ func TestAttachmentGetHandler_InvalidIndex(t *testing.T) {
 
 func TestAttachmentGetHandler_PathTraversal(t *testing.T) {
 	t.Parallel()
+	traversalPath := filepath.Join(t.TempDir(), "child") + string(filepath.Separator) + ".." +
+		string(filepath.Separator) + "etc" + string(filepath.Separator) + "passwd"
 
 	mock := &mockIMAPOps{
 		defaultAccountID:      "test",
@@ -269,7 +359,7 @@ func TestAttachmentGetHandler_PathTraversal(t *testing.T) {
 	result, err := handler(t.Context(), toolReq(map[string]any{
 		"id":     "test:INBOX:42",
 		"index":  float64(0),
-		"saveTo": "/tmp/../etc/passwd",
+		"saveTo": traversalPath,
 	}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

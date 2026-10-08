@@ -1,6 +1,7 @@
 package tools_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,27 @@ import (
 )
 
 var errConnectionReset = errors.New("connection reset")
+
+func TestForwardHandler_RejectsAccountMismatch(t *testing.T) {
+	t.Parallel()
+
+	imapMock := &mockIMAPOps{}
+	smtpMock := &mockSMTPOps{}
+	result, err := tools.ForwardHandler(imapMock, smtpMock, tools.AttachmentLimits{})(
+		t.Context(), toolReq(map[string]any{
+			"id": "acct1:INBOX:42", "to": "dest@example.com", "account": "acct2",
+		}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError || !strings.Contains(resultText(t, result), "does not match") {
+		t.Fatalf("expected account mismatch error, got %s", resultText(t, result))
+	}
+	if imapMock.lastGetMessageArgs.accountID != "" || smtpMock.sendCalled {
+		t.Fatal("mismatched account must fail before reading or sending")
+	}
+}
 
 func TestForwardHandler_HappyPath(t *testing.T) {
 	t.Parallel()
@@ -86,6 +108,26 @@ func TestForwardHandler_HappyPath(t *testing.T) {
 	// Verify forwarded content includes original body
 	if !strings.Contains(smtpMock.lastSendReq.Body, "Here is the update.") {
 		t.Errorf("body should contain original message body")
+	}
+}
+
+func TestForwardHandler_AppendsTransmittedCopy(t *testing.T) {
+	t.Parallel()
+
+	wantRaw := []byte("From: me@example.com\r\nMessage-ID: <forward@example.com>\r\n\r\nforward")
+	imapMock := &mockIMAPOps{getMessageResult: &models.Email{
+		ID: "acct1:INBOX:42", From: "alice@example.com", Subject: "Hello",
+	}}
+	smtpMock := &mockSMTPOps{sentCopy: wantRaw}
+	result, err := tools.ForwardHandler(imapMock, smtpMock, testLimits)(
+		t.Context(), toolReq(map[string]any{"id": "acct1:INBOX:42", "to": "bob@example.com"}),
+	)
+	if err != nil || result.IsError {
+		t.Fatalf("forward failed: err=%v result=%s", err, resultText(t, result))
+	}
+	if imapMock.lastAppendSentArgs.accountID != "acct1" ||
+		!bytes.Equal(imapMock.lastAppendSentArgs.msg, wantRaw) {
+		t.Fatalf("unexpected Sent copy: %+v", imapMock.lastAppendSentArgs)
 	}
 }
 

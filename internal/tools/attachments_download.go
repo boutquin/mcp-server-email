@@ -23,6 +23,7 @@ var (
 	errSavePathRequired  = errors.New("saveTo must be an absolute path")
 	errSavePathTraversal = errors.New("saveTo must not contain path traversal (..)")
 	errSaveParentMissing = errors.New("saveTo parent directory does not exist")
+	errSaveExists        = errors.New("saveTo target already exists")
 	errIndexRequired     = errors.New("index is required")
 )
 
@@ -116,18 +117,31 @@ func AttachmentGetHandler(ops imap.Operations, limits AttachmentLimits) server.T
 
 // handleSaveAttachment validates the save path and writes the attachment to disk.
 func handleSaveAttachment(data []byte, filename, saveTo string) (*mcp.CallToolResult, error) {
-	err := validateSavePath(saveTo)
+	resolvedSaveTo, err := resolveSavePath(saveTo)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	err = os.WriteFile(saveTo, data, saveFilePerms)
+	file, err := os.OpenFile(resolvedSaveTo, os.O_WRONLY|os.O_CREATE|os.O_EXCL, saveFilePerms)
 	if err != nil {
+		if os.IsExist(err) {
+			return mcp.NewToolResultError(errSaveExists.Error()), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("write file: %s", err)), nil
+	}
+	_, writeErr := file.Write(data)
+	closeErr := file.Close()
+	if writeErr != nil {
+		_ = os.Remove(resolvedSaveTo)
+		return mcp.NewToolResultError(fmt.Sprintf("write file: %s", writeErr)), nil
+	}
+	if closeErr != nil {
+		_ = os.Remove(resolvedSaveTo)
+		return mcp.NewToolResultError(fmt.Sprintf("write file: %s", closeErr)), nil
 	}
 
 	return jsonResult(map[string]any{
-		"saved":    saveTo,
+		"saved":    resolvedSaveTo,
 		"filename": filename,
 		"size":     len(data),
 	}), nil
@@ -146,20 +160,39 @@ func handleReturnAttachment(data []byte, filename string) (*mcp.CallToolResult, 
 
 // validateSavePath checks that the save path is absolute, has no traversal, and parent exists.
 func validateSavePath(saveTo string) error {
+	_, err := resolveSavePath(saveTo)
+	return err
+}
+
+func resolveSavePath(saveTo string) (string, error) {
 	if !filepath.IsAbs(saveTo) {
-		return errSavePathRequired
+		return "", errSavePathRequired
 	}
 
-	if strings.Contains(saveTo, "..") {
-		return errSavePathTraversal
+	// Check both slash styles regardless of the host OS so Windows-style
+	// traversal cannot bypass validation when separators are mixed.
+	portablePath := strings.ReplaceAll(saveTo, `\`, "/")
+	for _, component := range strings.Split(portablePath, "/") {
+		if component == ".." {
+			return "", errSavePathTraversal
+		}
 	}
-
-	parent := filepath.Dir(saveTo)
-
-	info, err := os.Stat(parent)
+	clean := filepath.Clean(saveTo)
+	parent := filepath.Dir(clean)
+	if err := rejectSymlinkPath(parent, false); err != nil {
+		return "", err
+	}
+	realParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", errSaveParentMissing
+	}
+	info, err := os.Stat(realParent)
 	if err != nil || !info.IsDir() {
-		return errSaveParentMissing
+		return "", errSaveParentMissing
 	}
-
-	return nil
+	if err := rejectSymlinkPath(clean, true); err != nil {
+		return "", err
+	}
+	realTarget := filepath.Join(realParent, filepath.Base(clean))
+	return realTarget, nil
 }

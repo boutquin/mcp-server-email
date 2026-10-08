@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -35,11 +36,12 @@ func TestNewTokenStore_CreatesDir(t *testing.T) {
 func TestTokenStore_Path(t *testing.T) {
 	t.Parallel()
 
-	store := &TokenStore{baseDir: "/tmp/tokens"}
+	baseDir := filepath.Join(t.TempDir(), "tokens")
+	store := &TokenStore{baseDir: baseDir}
 
 	got := store.Path("myaccount")
 
-	want := "/tmp/tokens/myaccount.json"
+	want := filepath.Join(baseDir, "myaccount.json")
 	if got != want {
 		t.Errorf("Path() = %q, want %q", got, want)
 	}
@@ -241,6 +243,9 @@ func TestTokenStore_AtomicWrite(t *testing.T) {
 
 func TestTokenStore_FilePermissions(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permission bits are not portable to Windows")
+	}
 
 	store, err := NewTokenStore(t.TempDir())
 	if err != nil {
